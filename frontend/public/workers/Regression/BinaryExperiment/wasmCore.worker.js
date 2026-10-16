@@ -14,8 +14,14 @@
  * computeMs mengapit pemanggilan irls_core_bench, jadi termasuk penyalinan
  * X dan y ke memori linear Wasm dan serialisasi hasil (serde_wasm_bindgen).
  * result.coreMs adalah durasi inti murni yang diukur di dalam Wasm.
+ *
+ * Analisis lengkap (tombol OK): calculate_binary_logistic produksi dari paket
+ * yang sama; computeMs mencakup JSON.parse hasilnya (string JSON dari Rust).
+ *   { type: "init_full" } → { type: "ready_full", initMs }
+ *   { type: "run_full", runId, X, y, rows, cols, configJson, featureNamesJson }
+ *     → { type: "result", runId, result, computeMs, wasmMemoryBytes }
  */
-import init, { irls_core_bench } from "./pkg/statify_logistic.js";
+import init, { irls_core_bench, calculate_binary_logistic } from "./pkg/statify_logistic.js";
 
 let initPromise = null;
 let wasm = null;
@@ -42,6 +48,31 @@ self.onmessage = async (event) => {
       self.postMessage({ type: "ready", initMs, wasmMemoryBytes: wasmMemoryBytes() });
     } catch (err) {
       self.postMessage({ type: "error", runId: null, message: errorMessage(err) });
+    }
+    return;
+  }
+
+  if (msg.type === "init_full") {
+    try {
+      const t0 = performance.now();
+      await ensureInit();
+      self.postMessage({ type: "ready_full", initMs: performance.now() - t0 });
+    } catch (err) {
+      self.postMessage({ type: "error", runId: null, message: errorMessage(err) });
+    }
+    return;
+  }
+
+  if (msg.type === "run_full") {
+    const { runId, X, y, rows, cols, configJson, featureNamesJson } = msg;
+    try {
+      await ensureInit();
+      const t0 = performance.now();
+      const result = JSON.parse(calculate_binary_logistic(X, rows, cols, y, configJson, featureNamesJson));
+      const computeMs = performance.now() - t0;
+      self.postMessage({ type: "result", runId, result, computeMs, wasmMemoryBytes: wasmMemoryBytes() });
+    } catch (err) {
+      self.postMessage({ type: "error", runId, message: errorMessage(err) });
     }
     return;
   }

@@ -7,8 +7,10 @@ import path from "node:path";
  * - Run once di keempat mode → beta & S.E. identik (< 1e-8), termasuk dummy kategorik
  * - Compare with production → cocok dengan Enter produksi (< 1e-4)
  * - Batch kecil → selesai, akurasi < 1e-8, CSV per run + meta.json
- * - OK → output viewer berisi laporan SPSS yang IDENTIK dengan dialog Binary
- *   Logistic produksi (data, variabel, dan opsi default yang sama) + kartu eksperimen
+ * - OK di keempat konfigurasi (D, lalu A, B, C di dialog baru) → tiap laporan
+ *   SPSS IDENTIK dengan dialog Binary Logistic produksi (data, variabel, dan
+ *   opsi default yang sama), catatan kartu menyebut konfigurasinya, dan kartu
+ *   eksperimen berisi performa run OK tersebut
  * - Smoke test dialog Binary Logistic produksi (satu run Enter)
  * - Tidak ada error console/pageerror dari kode aplikasi
  *
@@ -20,6 +22,13 @@ const FIXTURE = path.join(__dirname, "fixtures", "bl_experiment_small.csv");
 const COVARIATES = ["x1", "x2", "x3", "grp"];
 const FEATURES = ["Constant", "x1", "x2", "x3", "grp(1)", "grp(2)"];
 const MODES = ["A", "B", "C", "D"] as const;
+type Mode = (typeof MODES)[number];
+const MODE_LABELS: Record<Mode, string> = {
+  A: "A. JavaScript – Main thread",
+  B: "B. JavaScript – Web Worker",
+  C: "C. Rust-Wasm – Main thread",
+  D: "D. Rust-Wasm – Web Worker",
+};
 const SPSS_TITLE = "Binary Logistic Regression";
 const EXPERIMENT_TITLE = "Binary Logistic (Experiment): 2×2 performance";
 
@@ -151,7 +160,34 @@ async function selectProductionVariables(page: Page) {
   }
 }
 
-test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV, SPSS output", async ({ page }) => {
+async function selectExperimentVariables(page: Page) {
+  await page.getByTestId("bl-exp-variable-item-y").click();
+  await page.getByTestId("bl-exp-move-to-dependent").click();
+  for (const v of COVARIATES) {
+    await page.getByTestId(`bl-exp-variable-item-${v}`).click();
+    await page.getByTestId("bl-exp-move-to-covariates").click();
+  }
+}
+
+/** OK pada konfigurasi `mode`; dialog tertutup setelah analisis selesai dan output tertulis. */
+async function runOk(page: Page, mode: Mode) {
+  await page.getByTestId("bl-exp-tab-experiment").click();
+  await page.getByTestId(`bl-exp-mode-${mode}`).click();
+  await expect(page.getByTestId("bl-exp-ok-config")).toContainText(MODE_LABELS[mode]);
+  await page.getByTestId("bl-exp-ok").click();
+  await expect(page.getByTestId("bl-exp-dialog")).toHaveCount(0, { timeout: 120_000 });
+}
+
+/** Teks header komponen + output statistik sebuah kartu, urut DOM (tanpa judul dan catatan kartu). */
+function cardOutputs(card: Locator): Promise<string[]> {
+  return card.evaluate((el) =>
+    Array.from(el.querySelectorAll('[data-testid^="component-header-"], [data-testid^="result-output-"]')).map(
+      (e) => (e as HTMLElement).innerText
+    )
+  );
+}
+
+test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV, OK in A/B/C/D", async ({ page }) => {
   const errors = collectErrors(page);
   await importFixture(page);
 
@@ -159,13 +195,7 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV,
   await expect(page.getByTestId("bl-exp-dialog")).toBeVisible();
   await expect(page.getByTestId("modal-title")).toHaveText("Binary Logistic (Experiment)");
   await expect(page.getByTestId("bl-exp-method-label")).toHaveText("Enter");
-
-  await page.getByTestId("bl-exp-variable-item-y").click();
-  await page.getByTestId("bl-exp-move-to-dependent").click();
-  for (const v of COVARIATES) {
-    await page.getByTestId(`bl-exp-variable-item-${v}`).click();
-    await page.getByTestId("bl-exp-move-to-covariates").click();
-  }
+  await selectExperimentVariables(page);
 
   await page.getByTestId("bl-exp-tab-experiment").click();
   await expect(page.getByTestId("bl-exp-n-original")).toHaveText("300");
@@ -240,13 +270,22 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV,
   expect(meta.orders).toHaveLength(2 * 2);
   expect(meta.environment.crossOriginIsolated).toBe(true);
 
-  // --- OK: laporan SPSS (pipeline produksi) + kartu eksperimen di output viewer ---
-  await page.getByTestId("bl-exp-ok").click();
-  await expect(page.getByTestId("bl-exp-dialog")).toHaveCount(0, { timeout: 120_000 });
+  // --- OK di keempat konfigurasi: laporan SPSS + kartu performa ---
+  // D di dialog ini (kartu eksperimen juga memuat Run once, batch, perbandingan), lalu A, B, C di dialog baru
+  const okOrder: Mode[] = ["D", "A", "B", "C"];
+  await runOk(page, "D");
+  expect(await statisticsPerAnalytic(page, EXPERIMENT_TITLE)).toEqual([6]);
+  for (const m of okOrder.slice(1)) {
+    await openRegressionItem(page, "Binary Logistic (Experiment)...");
+    await expect(page.getByTestId("bl-exp-dialog")).toBeVisible();
+    await selectExperimentVariables(page);
+    await runOk(page, m);
+  }
   const ours = await statisticsPerAnalytic(page, SPSS_TITLE);
-  expect(ours).toHaveLength(1);
+  expect(ours).toHaveLength(okOrder.length);
   expect(ours[0]).toBeGreaterThan(5);
-  expect(await statisticsPerAnalytic(page, EXPERIMENT_TITLE)).toEqual([5]);
+  expect(new Set(ours).size).toBe(1);
+  expect(await statisticsPerAnalytic(page, EXPERIMENT_TITLE)).toEqual([6, 1, 1, 1]);
 
   // --- Dialog Binary Logistic produksi dengan data & variabel yang sama ---
   await openRegressionItem(page, "Binary Logistic...");
@@ -254,33 +293,53 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV,
   await page.getByRole("button", { name: "OK", exact: true }).click();
   await expect
     .poll(() => statisticsPerAnalytic(page, SPSS_TITLE), { timeout: 120_000 })
-    .toEqual([ours[0], ours[0]]);
+    .toEqual([...ours, ours[0]]);
 
-  // --- Output viewer: kedua laporan SPSS harus identik ---
+  // --- Output viewer: keempat laporan SPSS eksperimen identik dengan laporan produksi ---
   await page.goto("/dashboard/result");
   const spssCards = page.locator('[data-testid^="result-analytic-"]').filter({
     has: page.locator('[data-testid^="analytic-title-"]', { hasText: new RegExp(`^${SPSS_TITLE}$`) }),
   });
-  await expect(spssCards).toHaveCount(2, { timeout: 60_000 });
+  await expect(spssCards).toHaveCount(okOrder.length + 1, { timeout: 60_000 });
+  const production = spssCards.nth(okOrder.length);
   for (const heading of ["Variables in the Equation", "Categorical Variables Codings", "Model Summary", "Classification Table"]) {
-    await expect(spssCards.nth(0).getByText(heading, { exact: true }).first()).toBeVisible();
+    await expect(production.getByText(heading, { exact: true }).first()).toBeVisible();
   }
-  const [experimentText, productionText] = [await spssCards.nth(0).innerText(), await spssCards.nth(1).innerText()];
-  expect(experimentText.length).toBeGreaterThan(500);
-  expect(experimentText).toEqual(productionText);
+  await expect(production.locator('[data-testid^="analytic-note-"]')).toHaveText("Method: Enter");
+  const productionOutputs = await cardOutputs(production);
+  expect(productionOutputs.join("\n").length).toBeGreaterThan(500);
+  for (const [i, m] of okOrder.entries()) {
+    const card = spssCards.nth(i);
+    await expect(card.locator('[data-testid^="analytic-note-"]')).toHaveText(`Method: Enter · computed with ${MODE_LABELS[m]}`);
+    expect(await cardOutputs(card), `SPSS output of OK ${m}`).toEqual(productionOutputs);
+  }
   const logHeaders = await page
     .locator('[data-testid^="log-header-"]')
     .evaluateAll((els) => els.map((e) => (e.textContent ?? "").replace(/^Log \d+:\s*/, "")));
-  expect(logHeaders).toHaveLength(2);
-  expect(logHeaders[0]).toEqual(logHeaders[1]);
-  const experimentCard = page.locator('[data-testid^="result-analytic-"]').filter({
+  expect(logHeaders).toHaveLength(okOrder.length + 1);
+  expect(new Set(logHeaders).size).toBe(1);
+
+  // --- Kartu eksperimen: performa run OK per konfigurasi ---
+  const experimentCards = page.locator('[data-testid^="result-analytic-"]').filter({
     has: page.locator('[data-testid^="analytic-title-"]', { hasText: EXPERIMENT_TITLE }),
   });
-  await expect(experimentCard).toHaveCount(1);
-  await expect(experimentCard).toContainText("Batch summary");
-  await expect(experimentCard).toContainText("Experiment vs production");
-  await expect(experimentCard).toContainText("PASS");
-  console.log(`SPSS output identical to production (${experimentText.length} chars); syntax: ${logHeaders[0]}`);
+  await expect(experimentCards).toHaveCount(okOrder.length);
+  for (const [i, m] of okOrder.entries()) {
+    const card = experimentCards.nth(i);
+    await expect(card).toContainText(`computed with ${MODE_LABELS[m]}`);
+    // Judul statistik tidak dirender viewer; judul tabel yang terlihat menyebut konfigurasinya
+    await expect(card).toContainText(`Analysis run performance – ${MODE_LABELS[m]}`);
+    const perf = (await card.locator('[data-testid^="result-output-"]').first().innerText()).replace(/\s+/g, " ");
+    const metric = (name: string) => perf.match(new RegExp(`${name} ([\\d.,]+)`))?.[1] ?? "?";
+    expect(metric("computeMs")).not.toBe("?");
+    console.log(
+      `OK ${m}: computeMs = ${metric("computeMs")}, e2eMs = ${metric("e2eMs")}, maxFrameGapMs = ${metric("maxFrameGapMs")}`
+    );
+  }
+  await expect(experimentCards.nth(0)).toContainText("Batch summary");
+  await expect(experimentCards.nth(0)).toContainText("Experiment vs production");
+  await expect(experimentCards.nth(0)).toContainText("PASS");
+  console.log(`SPSS output of OK A/B/C/D identical to production (${productionOutputs.length} blocks); syntax: ${logHeaders[0]}`);
 
   console.log(`Console/page errors:\n${errors.join("\n") || "(none)"}`);
   expect(errors.filter((e) => !/Failed to load resource/.test(e))).toEqual([]);

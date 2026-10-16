@@ -39,12 +39,13 @@ Semua file eksperimen:
 | Lokasi | Isi |
 |---|---|
 | `frontend/public/workers/Regression/BinaryExperiment/irls_core.js` | Inti IRLS JavaScript (ES module mandiri, tanpa dependency) |
+| `frontend/public/workers/Regression/BinaryExperiment/logistic_enter.js` | Port JavaScript analisis Binary Logistic produksi (Enter) untuk tombol OK di mode A/B (§6, *Tombol OK*) |
 | `frontend/public/workers/Regression/BinaryExperiment/jsCore.worker.js` | Worker mode B |
 | `frontend/public/workers/Regression/BinaryExperiment/wasmCore.worker.js` | Worker mode D |
 | `frontend/public/workers/Regression/BinaryExperiment/pkg/` | Paket wasm eksperimen (hasil `wasm-pack --target web`) |
 | `frontend/components/Modals/Analyze/Regression/BinaryLogistic/rust/src/bench/` | Inti IRLS Rust (`irls_core.rs`) + golden test data |
-| `frontend/components/Modals/Analyze/Regression/BinaryLogisticExperiment/` | Dialog, services, tipe, dokumen ini |
-| `frontend/__tests__/irlsCore.experiment.test.js`, `binaryLogisticExperiment.*.test.ts` | Unit test Jest |
+| `frontend/components/Modals/Analyze/Regression/BinaryLogisticExperiment/` | Dialog, services, tipe, skrip (`scripts/`), dokumen ini |
+| `frontend/__tests__/irlsCore.experiment.test.js`, `binaryLogisticExperiment.*.test.ts`, `logisticEnterParity.experiment.test.js` | Unit test Jest |
 | `tests/experiment/` | E2E Playwright (config terpisah + fixture CSV) |
 
 Modul Binary Logistic produksi, worker produksi, dan paket wasm produksi
@@ -226,21 +227,75 @@ kuantil tipe 7 seperti default R/NumPy), min, dan max untuk `computeMs`,
   responsivitas, tabel Run once, progress batch, ringkasan median/IQR, chart,
   validasi akurasi, perbandingan produksi, serta unduhan **CSV** (satu baris
   per run) dan **meta.json**. Data untuk analisis artikel diambil dari CSV.
-- **Output viewer (tombol OK)** menerima dua kartu di bawah satu log:
+- **Output viewer (tombol OK)** menjalankan analisis lengkap pada konfigurasi
+  yang dipilih di tab Experiment (lihat *Tombol OK* di bawah) dan menulis dua
+  kartu di bawah satu log:
   1. **"Binary Logistic Regression"**: laporan berkonvensi SPSS yang identik
      dengan modul Binary Logistic produksi (metode Enter, semua opsi default,
-     kategorik Indicator/Last). Isinya dibuat oleh pipeline produksi itu sendiri:
-     worker produksi (`calculate_binary_logistic`), formatter
+     kategorik Indicator/Last). Angkanya dihitung oleh mesin konfigurasi
+     terpilih; formatnya dibuat pipeline produksi: formatter
      `formatBinaryLogisticResult`, sintaks `generateLogisticRegressionSyntax`,
      dan pengelompokan komponen yang sama dengan `BinaryLogisticMain.tsx`.
-     Inti eksperimen sengaja hanya menghitung B, S.E., dan −2LL agar
-     perbandingan waktunya adil, sedangkan tabel SPSS juga butuh Block 0,
-     score test, classification table, pseudo-R², dsb.
-  2. **"Binary Logistic (Experiment): 2×2 performance"**: ringkasan Run once,
-     batch (median [Q1–Q3]), akurasi antar mode, dan selisih tiap mode
-     terhadap produksi. Kartu ini menghubungkan laporan SPSS dengan hasil inti
-     eksperimen (selisih koefisien ≤ 1e-15 pada uji E2E) dan ikut tersimpan
-     bersama sesi.
+     Catatan kartu menyebut konfigurasinya, mis.
+     `Method: Enter · computed with B. JavaScript – Web Worker`.
+  2. **"Binary Logistic (Experiment): 2×2 performance"**: tabel performa run OK
+     tersebut (*Analysis run (OK)*), lalu, bila ada di sesi dialog itu,
+     ringkasan Run once, batch (median [Q1–Q3]), akurasi antar mode, dan
+     selisih tiap mode terhadap produksi.
+
+### Tombol OK: analisis lengkap pada konfigurasi terpilih
+
+Run once dan batch hanya menjalankan inti IRLS (B, S.E., −2LL) agar
+perbandingan waktunya adil. Tabel SPSS juga butuh Block 0, score test,
+omnibus test, pseudo-R², classification table, Wald, dan CI, sehingga tombol OK
+menjalankan **analisis Binary Logistic lengkap** (metode Enter, opsi default)
+dengan mesin sesuai konfigurasi yang dipilih:
+
+| Mode | Mesin | Tempat |
+|---|---|---|
+| A | `logistic_enter.js` → `calculateBinaryLogistic` | main thread (`import()`) |
+| B | `logistic_enter.js` → `calculateBinaryLogistic` | `jsCore.worker.js` (pesan `init_full` / `run_full`) |
+| C | `calculate_binary_logistic` dari `pkg/` eksperimen + `JSON.parse` | main thread |
+| D | `calculate_binary_logistic` dari `pkg/` eksperimen + `JSON.parse` | `wasmCore.worker.js` (pesan `init_full` / `run_full`) |
+
+- `calculate_binary_logistic` di paket eksperimen adalah kode Rust produksi
+  yang sama (crate yang sama dikompilasi ulang), jadi C/D = analisis produksi.
+- `logistic_enter.js` adalah port JavaScript baris demi baris dari jalur
+  Enter produksi: `design_matrix::build` (Indicator, referensi Last), Block 0
+  (model konstanta, score test per variabel/grup, global), `irls::fit` lengkap
+  (cek condition number via SVD + eskalasi ridge, step-halving, deteksi
+  separasi + early stop, kovarians `try_inverse` → regularisasi →
+  pseudo-inverse, pesan peringatan yang sama), Block 1 (omnibus, Cox & Snell,
+  Nagelkerke, classification table cutoff 0,5, Wald, Wald gabungan grup,
+  CI 95%), serta fungsi distribusi statrs (`gamma_lr`, `ln_gamma` Lanczos) dan
+  bentuk hasil serde (`NaN`/`±Infinity` → `null`). Aljabar liniernya ditulis
+  ulang meniru nalgebra (rumus tertutup invers 1–4 dimensi, LU dengan
+  partial pivoting, Cholesky); SVD diganti dekomposisi eigen Jacobi, yang
+  setara untuk Hessian yang simetris (lihat §10).
+- Kedua mesin menerima input yang sama dengan worker produksi: X mentah n×k
+  row-major (kode kategori, bukan dummy), y 0/1, `configJson` produksi, dan
+  nama kovariat. `model_info` (encoding Y/X, jumlah kasus, nama variabel)
+  ditambahkan di main thread seperti worker produksi, di luar timer.
+- Aturan pengukuran sama dengan run inti (§6.4): mesin dimuat/worker
+  disiapkan dan buffer disalin **sebelum** timer, dispatch dari task baru,
+  monitor frame dan long task di jendela yang sama. Opsi *fresh worker per
+  run (cold)* juga berlaku untuk OK.
+
+Metrik pada kartu *Analysis run (OK)*:
+
+| Metrik | Definisi |
+|---|---|
+| `computeMs` | Analisis lengkap, diukur di konteks tempat mesin berjalan. C/D mencakup penyalinan input ke memori Wasm, serialisasi `serde_json` di Rust, dan `JSON.parse` di JS (string JSON adalah antarmuka produksi). A/B mengembalikan objek JS langsung. |
+| `e2eMs`, `overheadMs` | Seperti §5; untuk B/D `overheadMs` memuat structured clone objek hasil lengkap (jauh lebih besar daripada hasil inti). |
+| `engineInitMs` | Pemuatan mesin sebelum timer: `import()` `logistic_enter.js` (A, B di dalam worker) atau `init()` wasm (C, D). ≈ 0 bila sudah dimuat sebelumnya di halaman/worker itu. |
+| `spawnMs`, `initMs` | Hanya bila run OK ini membuat worker baru (cold, atau worker warm pertama di dialog). |
+| `maxFrameGapMs`, `droppedFrames`, `longTasks`, `heapUsedMB`, `wasmMemoryMB` | Seperti §5. |
+| `formatMs` | `formatBinaryLogisticResult` produksi di main thread (sama untuk keempat mode, di luar `e2eMs`). |
+| `saveMs` | Penulisan log + tabel SPSS ke store hasil (IndexedDB), di luar `e2eMs`. |
+
+Satu klik OK adalah **satu run tanpa warm-up**: berguna untuk demonstrasi dan
+untuk memastikan keempat konfigurasi menghasilkan laporan yang sama, bukan
+untuk inferensi. Data artikel tetap diambil dari batch (CSV).
 
 ## 7. Validasi akurasi
 
@@ -251,7 +306,8 @@ kuantil tipe 7 seperti default R/NumPy), min, dan max untuk `computeMs`,
 | Biner wasm | Golden values via Node (`initSync`) | identik bit-per-bit (Δ = 0) |
 | Antar mode (UI) | Per N: max \|Δβ\| dan max \|ΔSE\| tiap mode terhadap run pertama mode D, atas semua ulangan | kriteria < 1e-8 |
 | Terhadap produksi (UI) | Tombol *Compare with production*: `calculate_binary_logistic` (Enter, opsi default, kategorik Indicator/Last) lewat worker produksi pada data N asli; baris "Constant" ↔ kolom intercept, kovariat dan dummy (`nama(j)`) dicocokkan lewat nama, baris omnibus grup kategorik dilewati | kriteria < 1e-4 |
-| Output viewer (E2E) | Laporan SPSS dari tombol OK dibandingkan dengan laporan dialog Binary Logistic produksi untuk data dan variabel yang sama | teks kartu dan sintaks identik |
+| Port JS analisis lengkap | `scripts/checkEnterParity.mjs` (juga dijalankan Jest lewat `logisticEnterParity.experiment.test.js`): seluruh objek hasil `logistic_enter.js` vs `calculate_binary_logistic` Rust (paket eksperimen via `initSync`) pada 7 dataset: numerik, kategorik, step-halving + separasi, hampir separasi, kolinear sempurna, kolom nol, kategorik kecil. Semua field dibandingkan, termasuk pesan peringatan | lulus; selisih berskala maks 7,3e-14 (kriteria \|Δ\| ≤ 1e-8 · max(1, \|a\|, \|b\|)) |
+| Output viewer (E2E) | Tombol OK di keempat konfigurasi (D, A, B, C) vs dialog Binary Logistic produksi untuk data dan variabel yang sama | header komponen, isi tabel, dan sintaks identik untuk keempat mode |
 
 Kasus step-halving di golden test dipilih dengan sengaja: semua perbandingan
 log-likelihood pada kasus itu jauh di atas noise pembulatan (penurunan LL 0,55%
@@ -286,8 +342,14 @@ Unit test:
 cd frontend/components/Modals/Analyze/Regression/BinaryLogistic/rust
 cargo test
 cd ../../../../../..   # kembali ke frontend
-npx jest __tests__/irlsCore.experiment.test.js __tests__/binaryLogisticExperiment
+npx jest __tests__/irlsCore.experiment.test.js __tests__/binaryLogisticExperiment __tests__/logisticEnterParity.experiment.test.js
 ```
+
+Paritas port JS vs Rust juga bisa dijalankan langsung (dari folder `frontend`,
+butuh paket `pkg/` hasil build wasm):
+`node components/Modals/Analyze/Regression/BinaryLogisticExperiment/scripts/checkEnterParity.mjs`.
+Bila jalur Enter produksi di Rust berubah, `logistic_enter.js` harus ikut
+diperbarui; skrip ini akan gagal bila keduanya tidak lagi sama.
 
 Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
 `node components/Modals/Analyze/Regression/BinaryLogisticExperiment/scripts/genIrlsFixtures.mjs`
@@ -324,8 +386,9 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
    mengukur biaya pembuatan worker.
 8. Unduh **CSV** (satu baris per run) dan **meta.json** setelah setiap batch.
    Pastikan tabel akurasi lulus (< 1e-8) dan *Compare with production* lulus (< 1e-4).
-   Klik **OK** untuk menyimpan laporan SPSS dan kartu ringkasan eksperimen ke
-   output viewer (lihat §6, *Penyajian hasil*).
+   Pilih konfigurasi lalu klik **OK** untuk menjalankan analisis lengkap pada
+   konfigurasi itu dan menyimpan laporan SPSS + kartu performa (dan ringkasan
+   batch) ke output viewer (lihat §6, *Tombol OK*).
 9. Untuk rekaman demo freeze: pilih mode A atau C, N = 100.000, lalu *Run once*.
    Indikator responsivitas (bar + FPS) digerakkan rAF di main thread, jadi bar
    berhenti selama inti berjalan; ulangi dengan B/D untuk pembanding.
@@ -375,6 +438,15 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
 - **Resampling dengan pengembalian** mempertahankan distribusi data asli tetapi
   menghasilkan baris duplikat; jumlah iterasi IRLS bisa berbeda antar N
   (tercatat di kolom `iterations`).
+- **Waktu tombol OK bukan kontras bersih.** Pada OK, A/B menjalankan port JS
+  dan C/D kode Rust produksi. Algoritma dan urutan langkahnya sama dan hasilnya
+  identik hingga pembulatan, tetapi implementasi aljabar liniernya tidak
+  identik baris demi baris seperti `irls_core` (mis. condition number: eigen
+  Jacobi Hessian di JS vs SVD nalgebra di Rust; nalgebra juga memakai struktur
+  data dan alokasi sendiri). C/D juga membayar serialisasi JSON dua arah
+  (`serde_json` → string → `JSON.parse`), sedangkan A/B tidak. Karena itu
+  selisih waktu OK mencampur efek runtime dengan efek implementasi; kontras
+  teknologi × lokasi yang bersih tetap berasal dari Run once/batch.
 - **Validitas eksternal.** Hasil berlaku untuk satu browser/mesin per batch;
   mesin JS dan Wasm lain (SpiderMonkey, JavaScriptCore) dapat berperilaku
   berbeda. Inti eksperimen sengaja lebih sederhana dari `irls::fit` produksi

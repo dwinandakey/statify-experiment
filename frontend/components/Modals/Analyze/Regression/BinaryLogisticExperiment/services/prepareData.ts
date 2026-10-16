@@ -87,7 +87,14 @@ export function encodeDependent(rawY: (string | number)[]): {
 export function encodeCategorical(
   rawValues: (string | number)[],
   name: string
-): { columns: Float64Array[]; coding: CategoricalCoding } {
+): {
+  columns: Float64Array[];
+  coding: CategoricalCoding;
+  /** Kode tahap-1 per baris (masukan calculate_binary_logistic). */
+  rawCodes: Float64Array;
+  /** Entri x_encodings produksi: nilai asli (string) → kode. */
+  encoding: Record<string, number>;
+} {
   const sortedValues = Array.from(new Set(rawValues)).sort((a, b) => {
     const numA = Number(a);
     const numB = Number(b);
@@ -127,7 +134,52 @@ export function encodeCategorical(
       categories: categoryCodes.map((code, c) => ({ label: labelOf(code), code, frequency: frequency[c] })),
       dummyNames: Array.from({ length: k - 1 }, (_, j) => `${name}(${j + 1})`),
     },
+    rawCodes: Float64Array.from(rowCodes),
+    encoding: Object.fromEntries(codeMap),
   };
+}
+
+/**
+ * rustConfig seperti yang dibangun binaryLogistic.worker.js produksi dari
+ * analysisConfig dialog produksi (metode Enter, DEFAULT_BINARY_LOGISTIC_OPTIONS_PARAMS).
+ */
+export function buildProductionRustConfig(categoricalColumnIndices: number[]): string {
+  return JSON.stringify({
+    dependent_index: 0,
+    independent_indices: [],
+    categoricalVariables: categoricalColumnIndices.map((columnIndex) => ({
+      columnIndex,
+      method: "Indicator",
+      reference: "Last",
+    })),
+    max_iterations: 20,
+    convergence_threshold: 0.001,
+    include_constant: true,
+    confidence_level: 95,
+    cutoff: 0.5,
+    method: "Enter",
+    p_entry: 0.05,
+    p_removal: 0.1,
+    hosmer_lemeshow: false,
+    classification_plots: false,
+    casewise_listing: false,
+    casewise_type: "outliers",
+    casewise_outliers: 2.0,
+    iteration_history: false,
+    correlations: false,
+    display_at_last_step: false,
+    save_predicted_probabilities: false,
+    save_predicted_group: false,
+    save_residuals_unstandardized: false,
+    save_residuals_logit: false,
+    save_residuals_studentized: false,
+    save_residuals_standardized: false,
+    save_residuals_deviance: false,
+    save_influence_cooks: false,
+    save_influence_leverage: false,
+    save_influence_dfbeta: false,
+    assumptions: { multicollinearity: false, box_tidwell: false },
+  });
 }
 
 export function prepareExperimentData(
@@ -164,18 +216,25 @@ export function prepareExperimentData(
   }
   const n = cleanRows.length;
 
-  // Kolom design matrix sesuai urutan kovariat: numerik → 1 kolom, kategorik → k-1 dummy
+  // Kolom design matrix sesuai urutan kovariat: numerik → 1 kolom, kategorik → k-1 dummy.
+  // Sekaligus kolom mentah tahap-1 (input analisis lengkap, seperti xMatrix worker produksi).
   const designColumns: Float64Array[] = [];
+  const rawColumns: Float64Array[] = [];
   const featureNames: string[] = ["Constant"];
   const categoricalCodings: CategoricalCoding[] = [];
+  const categoricalColumnIndices: number[] = [];
+  const xEncodings: Record<string, Record<string, number>> = {};
   const invalid: { name: string; value: unknown; row: number }[] = [];
-  for (const cov of covs) {
+  covs.forEach((cov, covIdx) => {
     const raw = cleanRows.map((row) => row[cov.columnIndex] as string | number);
     if (isCategoricalCovariate(cov)) {
-      const { columns, coding } = encodeCategorical(raw, cov.name);
+      const { columns, coding, rawCodes, encoding } = encodeCategorical(raw, cov.name);
       designColumns.push(...columns);
       featureNames.push(...coding.dummyNames);
       categoricalCodings.push(coding);
+      rawColumns.push(rawCodes);
+      categoricalColumnIndices.push(covIdx);
+      xEncodings[cov.name] = encoding;
     } else {
       // Cabang non-kategorik processCovariates: Number(val), NaN ditolak
       const col = new Float64Array(n);
@@ -185,9 +244,10 @@ export function prepareExperimentData(
         else col[i] = num;
       });
       designColumns.push(col);
+      rawColumns.push(col);
       featureNames.push(cov.name);
     }
-  }
+  });
   if (invalid.length > 0) {
     const names = [...new Set(invalid.map((v) => v.name))];
     const sample = invalid
@@ -215,6 +275,11 @@ export function prepareExperimentData(
   const { yVector, yMap } = encodeDependent(rawY);
   const y = Float64Array.from(yVector);
 
+  const k = rawColumns.length;
+  const xRaw = new Float64Array(n * k);
+  for (let i = 0; i < n; i++) for (let j = 0; j < k; j++) xRaw[i * k + j] = rawColumns[j][i];
+  const covariateNames = covs.map((c) => c.name);
+
   return {
     X,
     y,
@@ -227,6 +292,22 @@ export function prepareExperimentData(
     dependent: dep,
     covariates: covs,
     categoricalCodings,
+    full: {
+      X: xRaw,
+      y,
+      rows: n,
+      cols: k,
+      configJson: buildProductionRustConfig(categoricalColumnIndices),
+      featureNamesJson: JSON.stringify(covariateNames),
+      modelInfo: {
+        y_encoding: yMap,
+        x_encodings: xEncodings,
+        n_samples: n,
+        n_missing: data.length - n,
+        variables: covariateNames,
+        include_constant: true,
+      },
+    },
   };
 }
 

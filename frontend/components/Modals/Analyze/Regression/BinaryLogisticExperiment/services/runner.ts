@@ -20,12 +20,14 @@ import type {
   CoreResult,
   DatasetForRun,
   ExperimentMode,
+  FullAnalysisInput,
+  FullRunRecord,
   InitTimings,
   PreparedData,
   RunRecord,
   WarmWorkerInit,
 } from "../types/experiment";
-import { MODES, MODE_ORDER } from "../types/experiment";
+import { DEFAULT_MAX_ITER, DEFAULT_TOL, MODES, MODE_ORDER } from "../types/experiment";
 import {
   FrameMonitor,
   type FrameStats,
@@ -43,6 +45,7 @@ import { deriveSeed, mulberry32, shuffleInPlace } from "./prng";
 // disimpan di konstanta: literal path absolut di import() memicu TS2307 karena
 // TypeScript mencoba me-resolve-nya sebagai file; hasil runtime-nya identik.
 export const IRLS_CORE_URL = "/workers/Regression/BinaryExperiment/irls_core.js";
+export const ENTER_JS_URL = "/workers/Regression/BinaryExperiment/logistic_enter.js";
 export const WASM_PKG_URL = "/workers/Regression/BinaryExperiment/pkg/statify_logistic.js";
 export const JS_WORKER_URL = "/workers/Regression/BinaryExperiment/jsCore.worker.js";
 export const WASM_WORKER_URL = "/workers/Regression/BinaryExperiment/wasmCore.worker.js";
@@ -71,6 +74,25 @@ interface WasmExports {
 interface WasmPkgModule {
   default: () => Promise<WasmExports>;
   irls_core_bench(x: Float64Array, n: number, p: number, y: Float64Array, maxIter: number, tol: number): RawCoreResult;
+  calculate_binary_logistic(
+    x: Float64Array,
+    rows: number,
+    cols: number,
+    y: Float64Array,
+    configJson: string,
+    featureNamesJson: string
+  ): string;
+}
+
+interface EnterModule {
+  calculateBinaryLogistic(
+    x: Float64Array,
+    rows: number,
+    cols: number,
+    y: Float64Array,
+    configJson: string,
+    featureNamesJson: string
+  ): unknown;
 }
 
 type WorkerKind = "B" | "D";
@@ -94,8 +116,9 @@ export function errorMessage(err: unknown): string {
 
 // --- Modul main thread (mode A dan C): dimuat sekali per page load ---
 
-const mainThreadInit: InitTimings = { jsImportMs: null, wasmImportMs: null, wasmInitMs: null };
+const mainThreadInit: InitTimings = { jsImportMs: null, enterImportMs: null, wasmImportMs: null, wasmInitMs: null };
 let jsCorePromise: Promise<IrlsCoreModule> | null = null;
+let enterPromise: Promise<EnterModule> | null = null;
 let wasmPromise: Promise<{ pkg: WasmPkgModule; exports: WasmExports }> | null = null;
 
 /** Durasi import/init pertama di halaman ini (cold, sekali per page load). */
@@ -116,6 +139,22 @@ export function loadJsCore(): Promise<IrlsCoreModule> {
     });
   }
   return jsCorePromise;
+}
+
+/** Mode A (OK): port JS analisis lengkap, dimuat sekali per page load. */
+export function loadEnterJs(): Promise<EnterModule> {
+  if (!enterPromise) {
+    enterPromise = (async () => {
+      const t0 = performance.now();
+      const mod = (await import(/* webpackIgnore: true */ ENTER_JS_URL)) as EnterModule;
+      mainThreadInit.enterImportMs = performance.now() - t0;
+      return mod;
+    })();
+    enterPromise.catch(() => {
+      enterPromise = null;
+    });
+  }
+  return enterPromise;
 }
 
 export function loadWasmMain(): Promise<{ pkg: WasmPkgModule; exports: WasmExports }> {
@@ -190,6 +229,10 @@ export class WorkerPool {
   readonly initInfo: Partial<Record<WorkerKind, WarmWorkerInit>> = {};
   private workers: Partial<Record<WorkerKind, Promise<SpawnedWorker>>> = {};
 
+  has(kind: WorkerKind): boolean {
+    return this.workers[kind] !== undefined;
+  }
+
   get(kind: WorkerKind): Promise<SpawnedWorker> {
     let p = this.workers[kind];
     if (!p) {
@@ -224,24 +267,25 @@ export class WorkerPool {
 
 let runCounter = 0;
 
-interface WorkerRunOutcome {
+/** Hasil satu dispatch terukur: t0/t1 di jam main thread, computeMs di konteks eksekusi. */
+interface Timed<T> {
   t0: number;
   t1: number;
   computeMs: number;
-  raw: RawCoreResult;
+  raw: T;
   wasmMemoryBytes: number | null;
 }
 
-function runOnWorker(
+/**
+ * Kirim satu pesan run ke worker (X dan y sebagai transferable) dan tunggu
+ * hasil dengan runId yang sama. t0 dicatat tepat sebelum postMessage, t1 di
+ * awal handler pesan hasil.
+ */
+function runOnWorker<T>(
   worker: Worker,
-  X: Float64Array,
-  y: Float64Array,
-  n: number,
-  p: number,
-  maxIter: number,
-  tol: number,
+  message: Record<string, unknown> & { X: Float64Array; y: Float64Array },
   signal?: AbortSignal
-): Promise<WorkerRunOutcome> {
+): Promise<Timed<T>> {
   return new Promise((resolve, reject) => {
     const runId = ++runCounter;
     let t0 = 0;
@@ -281,7 +325,33 @@ function runOnWorker(
     signal?.addEventListener("abort", onAbort, { once: true });
 
     t0 = performance.now();
-    worker.postMessage({ type: "run", runId, X, y, n, p, maxIter, tol }, [X.buffer, y.buffer]);
+    worker.postMessage({ ...message, runId }, [message.X.buffer, message.y.buffer]);
+  });
+}
+
+/** Siapkan mesin analisis lengkap di worker (memuat logistic_enter.js / wasm init) di luar timer. */
+function initFullOnWorker(worker: Worker): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      worker.removeEventListener("message", onMessage);
+    };
+    const onMessage = (ev: MessageEvent) => {
+      const m = ev.data;
+      if (m?.type === "ready_full") {
+        cleanup();
+        resolve(m.initMs);
+      } else if (m?.type === "error" && m.runId === null) {
+        cleanup();
+        reject(new WorkerFailure(`Worker failed to load the analysis engine: ${m.message}`));
+      }
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new WorkerFailure("Worker did not load the analysis engine in time"));
+    }, WORKER_SPAWN_TIMEOUT_MS);
+    worker.addEventListener("message", onMessage);
+    worker.postMessage({ type: "init_full" });
   });
 }
 
@@ -326,10 +396,89 @@ interface PendingRun {
   pageHidden: boolean;
 }
 
-async function measureRun(mode: ExperimentMode, data: DatasetForRun, env: RunEnv): Promise<PendingRun> {
+interface Measured<T> {
+  t0: number;
+  t1: number;
+  computeMs: number;
+  raw: T | null;
+  error: string | null;
+  frames: FrameStats;
+  windowEnd: number;
+  heapUsedMB: number | null;
+  wasmMemoryBytes: number | null;
+  pageHidden: boolean;
+}
+
+/**
+ * Jendela pengukuran bersama untuk run inti (Run once/batch) dan analisis
+ * lengkap (OK): monitor frame menunggu frame baseline, dispatch dari task baru
+ * (bukan dari callback rAF), lalu menunggu satu frame setelah hasil tersedia.
+ * Untuk mode main, `dispatch` mengerjakan t0 → panggilan → t1 secara sinkron.
+ * Worker yang crash/dibatalkan dibuang dari pool; worker cold diakhiri; abort
+ * dilempar ulang setelah monitor dihentikan.
+ */
+async function measureWindow<T>(
+  mode: ExperimentMode,
+  env: RunEnv,
+  spawned: SpawnedWorker | null,
+  dispatch: () => Promise<Timed<T>>
+): Promise<Measured<T>> {
   ensureVisibilityListener();
   const visibilityAtStart = visibilityChanges;
   const hiddenAtStart = document.hidden;
+
+  await env.monitor.start();
+  await nextTask();
+  let t0 = performance.now();
+  let t1 = t0;
+  let computeMs = NaN;
+  let raw: T | null = null;
+  let error: string | null = null;
+  let wasmMemoryBytes: number | null = null;
+  let abort: unknown = null;
+  try {
+    const out = await dispatch();
+    ({ t0, t1, computeMs, raw, wasmMemoryBytes } = out);
+  } catch (err) {
+    t1 = performance.now();
+    error = errorMessage(err);
+    if (isAbort(err)) abort = err;
+    // Worker yang crash/dibatalkan tidak bisa dipercaya lagi
+    if ((isAbort(err) || err instanceof WorkerFailure) && (mode === "B" || mode === "D") && !env.coldWorkers) {
+      env.pool.discard(mode);
+    }
+  }
+
+  // Tunggu satu frame lagi agar gap yang memuat blocking ikut tercatat
+  const frames = await env.monitor.stop();
+  const windowEnd = performance.now();
+  const heap = heapUsedMB();
+  if (env.coldWorkers && spawned) spawned.worker.terminate();
+  if (abort) throw abort;
+
+  return {
+    t0,
+    t1,
+    computeMs,
+    raw,
+    error,
+    frames,
+    windowEnd,
+    heapUsedMB: heap,
+    wasmMemoryBytes,
+    pageHidden: hiddenAtStart || document.hidden || visibilityChanges !== visibilityAtStart,
+  };
+}
+
+/** Panggilan sinkron terukur di main thread (t0 → fn → t1 tanpa await di antaranya). */
+function timedCall<T>(fn: () => T, wasmMemory?: () => number): Timed<T> {
+  const t0 = performance.now();
+  const raw = fn();
+  const t1 = performance.now();
+  return { t0, t1, computeMs: t1 - t0, raw, wasmMemoryBytes: wasmMemory ? wasmMemory() : null };
+}
+
+async function measureRun(mode: ExperimentMode, data: DatasetForRun, env: RunEnv): Promise<PendingRun> {
   const timestamp = new Date().toISOString();
   const { maxIter, tol } = env;
   let spawnMs: number | null = null;
@@ -353,70 +502,101 @@ async function measureRun(mode: ExperimentMode, data: DatasetForRun, env: RunEnv
   const X = data.X.slice();
   const y = data.y.slice();
 
-  // 3. Mulai monitor frame, lalu dispatch dari task baru tepat setelah frame
-  //    baseline selesai dirender (bukan dari dalam callback rAF)
-  await env.monitor.start();
-  await nextTask();
-  let t0 = performance.now();
-  let t1 = t0;
-  let computeMs = NaN;
-  let raw: RawCoreResult | null = null;
-  let error: string | null = null;
-  let wasmMemoryBytes: number | null = null;
-  let abort: unknown = null;
-  try {
-    if (mode === "A") {
-      t0 = performance.now();
-      raw = jsCore!.irlsCore(X, y, data.n, data.p, maxIter, tol);
-      t1 = performance.now();
-      computeMs = t1 - t0;
-    } else if (mode === "C") {
-      t0 = performance.now();
-      raw = wasmMain!.pkg.irls_core_bench(X, data.n, data.p, y, maxIter, tol);
-      t1 = performance.now();
-      computeMs = t1 - t0;
-      wasmMemoryBytes = wasmMain!.exports.memory.buffer.byteLength;
-    } else {
-      const out = await runOnWorker(spawned!.worker, X, y, data.n, data.p, maxIter, tol, env.signal);
-      t0 = out.t0;
-      t1 = out.t1;
-      computeMs = out.computeMs;
-      raw = out.raw;
-      wasmMemoryBytes = out.wasmMemoryBytes;
+  // 3. Dispatch terukur
+  const m = await measureWindow<RawCoreResult>(mode, env, spawned, async () => {
+    if (mode === "A") return timedCall(() => jsCore!.irlsCore(X, y, data.n, data.p, maxIter, tol));
+    if (mode === "C") {
+      return timedCall(
+        () => wasmMain!.pkg.irls_core_bench(X, data.n, data.p, y, maxIter, tol),
+        () => wasmMain!.exports.memory.buffer.byteLength
+      );
     }
-  } catch (err) {
-    t1 = performance.now();
-    error = errorMessage(err);
-    if (isAbort(err)) abort = err;
-    // Worker yang crash/dibatalkan tidak bisa dipercaya lagi
-    if ((isAbort(err) || err instanceof WorkerFailure) && (mode === "B" || mode === "D") && !env.coldWorkers) {
-      env.pool.discard(mode);
+    return runOnWorker<RawCoreResult>(
+      spawned!.worker,
+      { type: "run", X, y, n: data.n, p: data.p, maxIter, tol },
+      env.signal
+    );
+  });
+
+  return { mode, timestamp, spawnMs, initMs, ...m };
+}
+
+interface PendingFullRun extends Measured<unknown> {
+  mode: ExperimentMode;
+  timestamp: string;
+  spawnMs: number | null;
+  initMs: number | null;
+  workerCreated: boolean;
+  engineInitMs: number | null;
+}
+
+/**
+ * Satu analisis Binary Logistic lengkap (tombol OK). A/B: port JS
+ * logistic_enter.js; C/D: calculate_binary_logistic Rust dari paket wasm
+ * eksperimen (+ JSON.parse hasil, di dalam computeMs). Input dan aturan
+ * pengukuran sama dengan run inti: mesin dimuat dan buffer disalin sebelum timer.
+ */
+async function measureFullRun(mode: ExperimentMode, input: FullAnalysisInput, env: RunEnv): Promise<PendingFullRun> {
+  const timestamp = new Date().toISOString();
+  let spawnMs: number | null = null;
+  let initMs: number | null = null;
+  let workerCreated = false;
+  let engineInitMs: number | null = null;
+
+  let enter: EnterModule | null = null;
+  let wasmMain: { pkg: WasmPkgModule; exports: WasmExports } | null = null;
+  let spawned: SpawnedWorker | null = null;
+  const tLoad = performance.now();
+  if (mode === "A") {
+    enter = await loadEnterJs();
+    engineInitMs = performance.now() - tLoad;
+  } else if (mode === "C") {
+    wasmMain = await loadWasmMain();
+    engineInitMs = performance.now() - tLoad;
+  } else {
+    if (env.coldWorkers) {
+      spawned = await spawnWorker(mode);
+      workerCreated = true;
+      spawnMs = spawned.spawnMs;
+      initMs = spawned.initMs;
+    } else {
+      const existed = env.pool.has(mode);
+      spawned = await env.pool.get(mode);
+      if (!existed) {
+        workerCreated = true;
+        spawnMs = spawned.spawnMs;
+        initMs = spawned.initMs;
+      }
+    }
+    try {
+      engineInitMs = await initFullOnWorker(spawned.worker);
+    } catch (err) {
+      if (env.coldWorkers) spawned.worker.terminate();
+      else env.pool.discard(mode);
+      throw err;
     }
   }
 
-  // 4. Tunggu satu frame lagi agar gap yang memuat blocking ikut tercatat
-  const frames = await env.monitor.stop();
-  const windowEnd = performance.now();
-  const heap = heapUsedMB();
-  if (env.coldWorkers && spawned) spawned.worker.terminate();
-  if (abort) throw abort;
+  const X = input.X.slice();
+  const y = input.y.slice();
+  const { rows, cols, configJson, featureNamesJson } = input;
 
-  return {
-    mode,
-    timestamp,
-    spawnMs,
-    initMs,
-    t0,
-    t1,
-    computeMs,
-    raw,
-    error,
-    frames,
-    windowEnd,
-    heapUsedMB: heap,
-    wasmMemoryBytes,
-    pageHidden: hiddenAtStart || document.hidden || visibilityChanges !== visibilityAtStart,
-  };
+  const m = await measureWindow<unknown>(mode, env, spawned, async () => {
+    if (mode === "A") return timedCall(() => enter!.calculateBinaryLogistic(X, rows, cols, y, configJson, featureNamesJson));
+    if (mode === "C") {
+      return timedCall(
+        () => JSON.parse(wasmMain!.pkg.calculate_binary_logistic(X, rows, cols, y, configJson, featureNamesJson)) as unknown,
+        () => wasmMain!.exports.memory.buffer.byteLength
+      );
+    }
+    return runOnWorker<unknown>(
+      spawned!.worker,
+      { type: "run_full", X, y, rows, cols, configJson, featureNamesJson },
+      env.signal
+    );
+  });
+
+  return { mode, timestamp, spawnMs, initMs, workerCreated, engineInitMs, ...m };
 }
 
 function normalizeResult(raw: RawCoreResult, mode: ExperimentMode): CoreResult {
@@ -499,9 +679,13 @@ export class ExperimentSession {
     return { ...this.pool.initInfo };
   }
 
-  /** Muat modul main thread lebih awal (opsional); timing tetap tercatat sekali per page load. */
+  /** Muat modul main thread inti lebih awal; timing tetap tercatat sekali per page load. */
   async preload(): Promise<void> {
     await Promise.all([loadJsCore(), loadWasmMain()]);
+  }
+
+  get isBusy(): boolean {
+    return this.busy;
   }
 
   async runSingle(
@@ -530,6 +714,50 @@ export class ExperimentSession {
         },
         this.longTasks
       );
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** Analisis Binary Logistic lengkap pada satu konfigurasi (tombol OK). */
+  async runFull(
+    mode: ExperimentMode,
+    input: FullAnalysisInput,
+    opts: { coldWorkers: boolean }
+  ): Promise<FullRunRecord> {
+    this.assertIdle();
+    this.busy = true;
+    try {
+      this.longTasks.start();
+      const env = this.env(opts.coldWorkers, DEFAULT_MAX_ITER, DEFAULT_TOL);
+      const pending = await measureFullRun(mode, input, env);
+      await interRunPause();
+      const lt = this.longTasks.collect(pending.t0, pending.windowEnd);
+      const e2eMs = pending.t1 - pending.t0;
+      return {
+        mode,
+        timestamp: pending.timestamp,
+        rows: input.rows,
+        cols: input.cols,
+        workerStart: MODES[mode].location === "worker" ? (opts.coldWorkers ? "cold" : "warm") : null,
+        workerCreated: pending.workerCreated,
+        engineInitMs: pending.engineInitMs,
+        computeMs: pending.computeMs,
+        e2eMs,
+        overheadMs: e2eMs - pending.computeMs,
+        spawnMs: pending.spawnMs,
+        initMs: pending.initMs,
+        maxFrameGapMs: pending.frames.maxFrameGapMs,
+        droppedFrames: pending.frames.droppedFrames,
+        frameCount: pending.frames.frameCount,
+        longTaskCount: lt ? lt.count : null,
+        longTaskTotalMs: lt ? lt.totalMs : null,
+        heapUsedMB: pending.heapUsedMB,
+        wasmMemoryMB: bytesToMB(pending.wasmMemoryBytes),
+        pageHidden: pending.pageHidden,
+        result: pending.error ? null : pending.raw,
+        error: pending.error,
+      };
     } finally {
       this.busy = false;
     }

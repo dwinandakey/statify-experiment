@@ -52,6 +52,30 @@ export interface CategoricalCoding {
   dummyNames: string[];
 }
 
+/**
+ * Input analisis lengkap (tombol OK), persis seperti yang dikirim worker
+ * produksi ke calculate_binary_logistic: kovariat mentah tahap-1 (kategorik =
+ * kode), config JSON, dan nama kovariat. Dipakai keempat mode.
+ */
+export interface FullAnalysisInput {
+  /** Row-major rows × cols, kovariat mentah (kode untuk kategorik), tanpa intercept. */
+  X: Float64Array;
+  y: Float64Array;
+  rows: number;
+  cols: number;
+  configJson: string;
+  featureNamesJson: string;
+  /** model_info yang ditambahkan worker produksi setelah komputasi (untuk formatter). */
+  modelInfo: {
+    y_encoding: Record<string, number>;
+    x_encodings: Record<string, Record<string, number>>;
+    n_samples: number;
+    n_missing: number;
+    variables: string[];
+    include_constant: boolean;
+  };
+}
+
 export interface PreparedData {
   /** Row-major n×p, kolom 0 = intercept (semua 1). Jangan dimutasi. */
   X: Float64Array;
@@ -70,6 +94,8 @@ export interface PreparedData {
   covariates: Variable[];
   /** Kovariat kategorik (nominal/ordinal) beserta dummy coding-nya. */
   categoricalCodings: CategoricalCoding[];
+  /** Input analisis lengkap Binary Logistic (tombol OK). */
+  full: FullAnalysisInput;
 }
 
 export interface DatasetForRun {
@@ -127,6 +153,25 @@ export interface RunRecord extends RunMetrics {
   timestamp: string;
 }
 
+/**
+ * Satu analisis Binary Logistic lengkap (tombol OK) pada konfigurasi terpilih.
+ * A/B: port JS logistic_enter.js; C/D: calculate_binary_logistic Rust-Wasm.
+ */
+export interface FullRunRecord extends RunMetrics {
+  mode: ExperimentMode;
+  timestamp: string;
+  rows: number;
+  cols: number;
+  workerStart: WorkerStart | null;
+  /** Worker baru dibuat untuk run ini (cold, atau warm pertama kali). */
+  workerCreated: boolean;
+  /** Pemuatan mesin analisis lengkap di luar timer (import logistic_enter.js / wasm init). */
+  engineInitMs: number | null;
+  /** Objek hasil mentah mesin (struktur LogisticResult produksi), null bila gagal. */
+  result: unknown;
+  error: string | null;
+}
+
 // --- Batch ---
 
 export interface BatchSettings {
@@ -152,6 +197,8 @@ export interface BatchProgress {
 export interface InitTimings {
   /** Mode A: import(irls_core.js) pertama di halaman ini. */
   jsImportMs: number | null;
+  /** Mode A (OK): import(logistic_enter.js) pertama di halaman ini. */
+  enterImportMs: number | null;
   /** Mode C: import(pkg/statify_logistic.js) pertama di halaman ini. */
   wasmImportMs: number | null;
   /** Mode C: init() wasm pertama di halaman ini (fetch + compile + instantiate). */

@@ -24,7 +24,7 @@ import type {
 } from "../types/experiment";
 import { DEFAULT_MAX_ITER, DEFAULT_TOL, MODES, MODE_ORDER } from "../types/experiment";
 import { prepareExperimentData, resample } from "../services/prepareData";
-import { ExperimentSession, errorMessage, getMainThreadInit, totalBatchRuns, validateSettings } from "../services/runner";
+import { type ExperimentSession, errorMessage, getMainThreadInit, totalBatchRuns, validateSettings } from "../services/runner";
 import { computeAccuracy, computeSummaries, worstAccuracyByN } from "../services/analysis";
 import { buildMetaJson, buildRunsCsv, downloadText } from "../services/exportCsv";
 import { compareWithProduction, runProductionEnter } from "../services/productionCompare";
@@ -47,6 +47,15 @@ interface ExperimentTabProps {
   covariates: Variable[];
   /** Tab sedang terlihat (indikator rAF hanya jalan saat terlihat). */
   active: boolean;
+  /** Sesi milik dialog utama (dipakai juga tombol OK); null sebelum siap. */
+  session: ExperimentSession | null;
+  /** Konfigurasi terpilih, dipakai Run once dan tombol OK. */
+  mode: ExperimentMode;
+  onModeChange: (mode: ExperimentMode) => void;
+  coldWorkers: boolean;
+  onColdWorkersChange: (cold: boolean) => void;
+  /** Tombol OK sedang menjalankan analisis lengkap memakai sesi yang sama. */
+  locked?: boolean;
   onBusyChange: (busy: boolean) => void;
   onResultsChange: (results: ExperimentResults) => void;
 }
@@ -90,7 +99,19 @@ function NumberField(props: { id: string; label: string; value: string; onChange
   );
 }
 
-export function ExperimentTab({ dependent, covariates, active, onBusyChange, onResultsChange }: ExperimentTabProps) {
+export function ExperimentTab({
+  dependent,
+  covariates,
+  active,
+  session: sessionProp,
+  mode,
+  onModeChange: setMode,
+  coldWorkers,
+  onColdWorkersChange: setColdWorkers,
+  locked = false,
+  onBusyChange,
+  onResultsChange,
+}: ExperimentTabProps) {
   const data = useDataStore((s) => s.data);
   const variables = useVariableStore((s) => s.variables);
 
@@ -107,7 +128,6 @@ export function ExperimentTab({ dependent, covariates, active, onBusyChange, onR
   }, [data, variables, dependent, covariates]);
 
   // --- Pengaturan ---
-  const [mode, setMode] = useState<ExperimentMode>("A");
   const [singleSize, setSingleSize] = useState<string>("original");
   const [singleCustom, setSingleCustom] = useState("");
   const [sizeChecks, setSizeChecks] = useState<Record<string, boolean>>({
@@ -120,7 +140,6 @@ export function ExperimentTab({ dependent, covariates, active, onBusyChange, onR
   const [warmup, setWarmup] = useState("5");
   const [repetitions, setRepetitions] = useState("30");
   const [seed, setSeed] = useState("42");
-  const [coldWorkers, setColdWorkers] = useState(false);
   const [chartMetric, setChartMetric] = useState<ChartMetric>("e2eMs");
 
   // --- Status & hasil ---
@@ -131,26 +150,17 @@ export function ExperimentTab({ dependent, covariates, active, onBusyChange, onR
   const [batch, setBatch] = useState<BatchResult | null>(null);
   const [comparison, setComparison] = useState<ComparisonResult | null>(null);
 
-  const sessionRef = useRef<ExperimentSession | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
-    const session = new ExperimentSession();
-    sessionRef.current = session;
-    return () => {
-      // Dialog ditutup: hentikan batch dan bebaskan worker/observer
-      abortRef.current?.abort();
-      session.dispose();
-      sessionRef.current = null;
-    };
-  }, []);
+  // Dialog ditutup: hentikan batch (sesi & worker dibuang oleh dialog utama)
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   useEffect(() => onBusyChange(busy !== "idle"), [busy, onBusyChange]);
   useEffect(() => onResultsChange({ single, batch, comparison }), [single, batch, comparison, onResultsChange]);
 
   const session = () => {
-    if (!sessionRef.current) throw new Error("Experiment session is not ready.");
-    return sessionRef.current;
+    if (!sessionProp) throw new Error("Experiment session is not ready.");
+    return sessionProp;
   };
 
   const nOriginal = prepared.ok ? prepared.value.n : null;
@@ -305,8 +315,8 @@ export function ExperimentTab({ dependent, covariates, active, onBusyChange, onR
     }
   };
 
-  const isBusy = busy !== "idle";
-  const canRun = prepared.ok && !isBusy;
+  const isBusy = busy !== "idle" || locked;
+  const canRun = prepared.ok && !isBusy && sessionProp !== null;
   const progressPct = progress && progress.total > 0 ? Math.min(100, (progress.completed / progress.total) * 100) : 0;
   const worst = batch ? worstAccuracyByN(batch.accuracy) : [];
   const hiddenRuns = batch ? batch.outcome.records.filter((r) => r.pageHidden).length : 0;
@@ -346,8 +356,9 @@ export function ExperimentTab({ dependent, covariates, active, onBusyChange, onR
         )}
       </div>
       <p className="text-xs text-muted-foreground">
-        OK writes the SPSS-format Binary Logistic output (production pipeline, method Enter, default options) to the
-        output viewer, followed by a separate card summarising these experiment results.
+        OK runs the full Binary Logistic analysis (method Enter, default options) with the configuration selected below
+        and writes the SPSS-format tables plus a performance report to the output viewer. A/B use the JavaScript port of
+        the production analysis, C/D the production Rust code compiled to WebAssembly.
       </p>
 
       <ResponsivenessIndicator active={active} />
@@ -357,6 +368,7 @@ export function ExperimentTab({ dependent, covariates, active, onBusyChange, onR
         <h3 className={sectionTitle}>
           <Play className="h-4 w-4 text-primary" aria-hidden /> Run once
         </h3>
+        <div className="text-xs text-muted-foreground">Configuration (used by Run once and by OK):</div>
         <RadioGroup
           value={mode}
           onValueChange={(v) => setMode(v as ExperimentMode)}
@@ -442,7 +454,7 @@ export function ExperimentTab({ dependent, covariates, active, onBusyChange, onR
                 <RunMetricsTable
                   record={single.record}
                   mainInit={getMainThreadInit()}
-                  warmInit={sessionRef.current?.warmWorkerInit ?? {}}
+                  warmInit={sessionProp?.warmWorkerInit ?? {}}
                 />
               </div>
             </div>
@@ -505,7 +517,7 @@ export function ExperimentTab({ dependent, covariates, active, onBusyChange, onR
               disabled={isBusy}
               data-testid="bl-exp-cold-workers"
             />
-            Fresh worker per run (cold)
+            Fresh worker per run (cold; also Run once and OK)
           </label>
         </div>
         <div className="text-xs text-muted-foreground">

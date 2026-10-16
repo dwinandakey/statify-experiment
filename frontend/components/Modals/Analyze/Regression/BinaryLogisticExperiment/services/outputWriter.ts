@@ -1,16 +1,16 @@
 /**
- * Tombol OK: tulis hasil ke output viewer.
+ * Tombol OK: jalankan analisis Binary Logistic lengkap (metode Enter, semua
+ * opsi default) pada konfigurasi A/B/C/D yang dipilih, lalu tulis ke output viewer.
  *
- * 1. Laporan statistik berkonvensi SPSS yang IDENTIK dengan modul Binary
- *    Logistic produksi (metode Enter, semua opsi default): payload dari worker
- *    produksi (calculate_binary_logistic), formatter produksi
- *    `formatBinaryLogisticResult`, sintaks dari `generateLogisticRegressionSyntax`,
- *    dan pengelompokan komponen yang sama dengan handleAnalyze di
- *    BinaryLogisticMain.tsx. Inti eksperimen sengaja hanya menghitung B, S.E.,
- *    dan -2LL (agar perbandingan waktunya adil), sedangkan tabel SPSS butuh
- *    Block 0, score test, classification table, dst.; kesamaan koefisiennya
- *    dengan produksi ditunjukkan di kartu eksperimen.
- * 2. Kartu terpisah "Binary Logistic (Experiment)" di bawah log yang sama:
+ * 1. Laporan statistik berkonvensi SPSS: objek hasil mesin terpilih (A/B: port
+ *    JS logistic_enter.js, C/D: calculate_binary_logistic Rust-Wasm) diberi
+ *    model_info seperti worker produksi, lalu diformat dengan formatter
+ *    produksi `formatBinaryLogisticResult`, sintaks dari
+ *    `generateLogisticRegressionSyntax`, dan pengelompokan komponen yang sama
+ *    dengan handleAnalyze di BinaryLogisticMain.tsx. Catatan kartu menyebut
+ *    konfigurasi yang menghitungnya.
+ * 2. Kartu "Binary Logistic (Experiment)" di bawah log yang sama: performa
+ *    run OK tersebut (compute, e2e, frame, long task, format, simpan), lalu
  *    ringkasan Run once, batch, akurasi antar mode, dan perbandingan produksi.
  *    Data mentah per run tetap lewat Download CSV.
  */
@@ -22,12 +22,12 @@ import {
   DEFAULT_BINARY_LOGISTIC_SAVE_PARAMS,
   type AnalysisSection,
   type BinaryLogisticCategoricalParams,
+  type LogisticResult,
 } from "@/components/Modals/Analyze/Regression/BinaryLogistic/types/binary-logistic";
-import type { ExperimentResults, PreparedData } from "../types/experiment";
+import type { ExperimentResults, FullRunRecord, PreparedData } from "../types/experiment";
 import { MODES } from "../types/experiment";
 import { isCategoricalCovariate } from "./prepareData";
-import { runProductionEnter } from "./productionCompare";
-import { fmtDiff, fmtInt, fmtMs, fmtNum } from "./format";
+import { fmtDiff, fmtInt, fmtMB, fmtMs, fmtNum } from "./format";
 
 const METHOD = "Enter" as const;
 export const EXPERIMENT_ANALYTIC_TITLE = "Binary Logistic (Experiment): 2×2 performance";
@@ -54,6 +54,25 @@ function rendererPayload(section: AnalysisSection) {
     return { charts: section.chartData.charts, description: section.description, title: section.title };
   }
   return { tables: [{ ...section.data, title: section.title }] };
+}
+
+/**
+ * Lengkapi hasil mentah mesin seperti worker produksi sebelum diformat:
+ * cek classification_table, method_used, dan model_info (encoding Y/X,
+ * jumlah kasus, nama variabel).
+ */
+export function toProductionPayload(raw: unknown, prepared: PreparedData): LogisticResult {
+  const result = raw as (LogisticResult & { step_history?: { step: number }[] }) | null;
+  if (!result || !result.classification_table) throw new Error("Calculation failed in backend.");
+  const history = result.step_history;
+  return {
+    ...result,
+    method_used: METHOD,
+    model_info: {
+      ...prepared.full.modelInfo,
+      step_number: history && history.length > 0 ? history[history.length - 1].step : 0,
+    },
+  } as LogisticResult;
 }
 
 /** Parameter kategorik setara state dialog produksi setelah deteksi otomatis nominal/ordinal. */
@@ -205,22 +224,73 @@ export function buildExperimentSections(results: ExperimentResults): ExperimentS
   return sections;
 }
 
+const ENGINE_LABEL: Record<"js" | "wasm", string> = {
+  js: "JavaScript port logistic_enter.js",
+  wasm: "Rust calculate_binary_logistic (WebAssembly)",
+};
+
+/** Tabel performa analisis lengkap yang dijalankan tombol OK. */
+function okRunSection(run: FullRunRecord, formatMs: number, saveMs: number): ExperimentSection {
+  const info = MODES[run.mode];
+  const rows: [string, string, string][] = [
+    ["computeMs", fmtMs(run.computeMs, 3), "full analysis, measured where it runs"],
+    ["e2eMs", fmtMs(run.e2eMs, 3), "main thread: dispatch → result available"],
+    ["overheadMs", fmtMs(run.overheadMs, 3), "e2eMs − computeMs"],
+    ["engineInitMs", fmtMs(run.engineInitMs, 3), "engine load before timing (0 if already loaded)"],
+  ];
+  if (run.workerCreated) {
+    rows.push(["spawnMs", fmtMs(run.spawnMs, 3), `new ${run.workerStart ?? ""} worker, before timing`]);
+    rows.push(["initMs", fmtMs(run.initMs, 3), "worker init, before timing"]);
+  }
+  rows.push(
+    ["maxFrameGapMs", fmtMs(run.maxFrameGapMs, 1), `${fmtInt(run.frameCount)} frames observed`],
+    ["droppedFrames", fmtInt(run.droppedFrames), "rAF gaps > 2 × 16.7 ms"],
+    [
+      "longTasks",
+      run.longTaskCount === null ? "n/a" : `${run.longTaskCount} · ${fmtMs(run.longTaskTotalMs, 1)} ms`,
+      "count · total",
+    ],
+    ["heapUsedMB", fmtMB(run.heapUsedMB), "main-thread JS heap (Chromium)"],
+    ["wasmMemoryMB", fmtMB(run.wasmMemoryMB), "wasm linear memory"],
+    ["formatMs", fmtMs(formatMs, 3), "production formatter on the main thread"],
+    ["saveMs", fmtMs(saveMs, 3), "writing the SPSS tables to the output store"]
+  );
+  return {
+    title: `Analysis run (OK) – ${info.label}`,
+    description:
+      `Full Binary Logistic analysis (Enter, default options) computed by ${ENGINE_LABEL[info.technology]} on the ` +
+      `${info.location === "main" ? "main thread" : "Web Worker"}; N = ${fmtInt(run.rows)}, covariates = ${run.cols}` +
+      `${run.pageHidden ? "; the tab was hidden during the run, frame metrics are invalid" : ""}.`,
+    component: "Experiment: Analysis run (OK)",
+    spec: table(
+      `Analysis run performance – ${info.label}`,
+      [["Metric", "metric"], ["Value", "value"], ["Notes", "notes"]],
+      rows.map(([metric, value, notes]) => ({ metric, value, notes }))
+    ),
+  };
+}
+
 /**
- * Jalankan Enter produksi pada data terpilih lalu tulis laporan SPSS +
- * kartu eksperimen. Mengembalikan jumlah statistik yang ditulis.
+ * Tulis laporan SPSS dari hasil analisis lengkap konfigurasi terpilih
+ * (`okRun`, dari ExperimentSession.runFull) + kartu eksperimen.
  */
 export async function writeExperimentOutput(
   prepared: PreparedData,
-  results: ExperimentResults
+  results: ExperimentResults,
+  okRun: FullRunRecord
 ): Promise<{ statisticalSections: number; experimentSections: number }> {
-  const production = await runProductionEnter(prepared);
-  const formatted = formatBinaryLogisticResult(production.payload, prepared.dependent, prepared.covariates, {
+  if (okRun.error || !okRun.result) throw new Error(okRun.error ?? "Analysis produced no result.");
+  const payload = toProductionPayload(okRun.result, prepared);
+
+  const tFormat = performance.now();
+  const formatted = formatBinaryLogisticResult(payload, prepared.dependent, prepared.covariates, {
     displayAtLastStep: !DEFAULT_OPTIONS.displayAtEachStep,
     ciForExpB: DEFAULT_OPTIONS.ciForExpB,
     ciLevel: DEFAULT_OPTIONS.ciLevel,
     cutoff: DEFAULT_OPTIONS.classificationCutoff,
     casewiseOutliers: DEFAULT_OPTIONS.casewiseOutliers,
   });
+  const formatMs = performance.now() - tFormat;
   const syntax = generateLogisticRegressionSyntax({
     dependent: prepared.dependent,
     covariates: prepared.covariates,
@@ -232,9 +302,12 @@ export async function writeExperimentOutput(
   });
 
   const { addLog, addAnalytic, addStatistic } = useResultStore.getState();
+  const tSave = performance.now();
   const logId = await addLog({ log: syntax });
-
-  const analyticId = await addAnalytic(logId, { title: "Binary Logistic Regression", note: `Method: ${METHOD}` });
+  const analyticId = await addAnalytic(logId, {
+    title: "Binary Logistic Regression",
+    note: `Method: ${METHOD} · computed with ${MODES[okRun.mode].label}`,
+  });
   const statSections = formatted.sections ?? [];
   for (const section of statSections) {
     await addStatistic(analyticId, {
@@ -244,23 +317,24 @@ export async function writeExperimentOutput(
       components: productionComponentCategory(section),
     });
   }
+  const saveMs = performance.now() - tSave;
 
-  const experimentSections = buildExperimentSections(results);
-  if (experimentSections.length > 0) {
-    const expId = await addAnalytic(logId, {
-      title: EXPERIMENT_ANALYTIC_TITLE,
-      note:
-        "JavaScript vs Rust-Wasm × main thread vs Web Worker (IRLS core only). The statistical tables above come from the " +
-        "production pipeline; this card summarises the benchmark and the agreement of the experiment cores with it.",
+  const coreSections = buildExperimentSections(results);
+  const experimentSections = [okRunSection(okRun, formatMs, saveMs), ...coreSections];
+  const expId = await addAnalytic(logId, {
+    title: EXPERIMENT_ANALYTIC_TITLE,
+    note:
+      `JavaScript vs Rust-Wasm × main thread vs Web Worker. The statistical tables above were computed with ` +
+      `${MODES[okRun.mode].label}` +
+      (coreSections.length > 0 ? "; Run once and batch results below use the IRLS core only." : "."),
+  });
+  for (const s of experimentSections) {
+    await addStatistic(expId, {
+      title: s.title,
+      description: s.description,
+      output_data: JSON.stringify({ tables: [s.spec] }),
+      components: s.component,
     });
-    for (const s of experimentSections) {
-      await addStatistic(expId, {
-        title: s.title,
-        description: s.description,
-        output_data: JSON.stringify({ tables: [s.spec] }),
-        components: s.component,
-      });
-    }
   }
   return { statisticalSections: statSections.length, experimentSections: experimentSections.length };
 }

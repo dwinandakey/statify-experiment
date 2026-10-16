@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -9,20 +9,26 @@ import { useDataStore } from "@/stores/useDataStore";
 import { useVariableStore } from "@/stores/useVariableStore";
 import type { BaseModalProps } from "@/types/modalTypes";
 import type { Variable } from "@/types/Variable";
-import type { ExperimentResults } from "../types/experiment";
+import type { ExperimentMode, ExperimentResults } from "../types/experiment";
+import { MODES } from "../types/experiment";
 import { covariateRejectionReason, prepareFromStores } from "../services/prepareData";
 import { writeExperimentOutput } from "../services/outputWriter";
+import { ExperimentSession } from "../services/runner";
+import { interRunPause } from "../services/metrics";
 import { VariablesTab } from "./VariablesTab";
 import { ExperimentTab } from "./ExperimentTab";
 
 /**
  * Dialog "Binary Logistic (Experiment)": eksperimen faktorial 2×2
- * (JavaScript vs Rust-Wasm × main thread vs Web Worker) untuk inti IRLS
- * regresi logistik biner. Lihat ../EXPERIMENT.md.
+ * (JavaScript vs Rust-Wasm × main thread vs Web Worker) untuk regresi
+ * logistik biner. Lihat ../EXPERIMENT.md.
  *
- * Modul Binary Logistic produksi tidak disentuh. Worker, formatter, dan
- * syntax generator produksi hanya dipakai ulang (read-only) untuk tombol
- * "Compare with production" dan untuk laporan SPSS di output viewer (OK).
+ * - Run once / batch (tab Experiment) mengukur inti IRLS.
+ * - OK menjalankan analisis Binary Logistic lengkap (Enter, opsi default) pada
+ *   konfigurasi terpilih dan menulis tabel SPSS + laporan performa.
+ *
+ * Modul Binary Logistic produksi tidak disentuh; worker, formatter, dan
+ * syntax generator produksi hanya dipakai ulang (read-only).
  */
 const EMPTY_RESULTS: ExperimentResults = { single: null, batch: null, comparison: null };
 
@@ -37,6 +43,16 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<ExperimentResults>(EMPTY_RESULTS);
   const [isWriting, setIsWriting] = useState(false);
+  const [mode, setMode] = useState<ExperimentMode>("A");
+  const [coldWorkers, setColdWorkers] = useState(false);
+
+  // Sesi (monitor frame, observer long task, worker) hidup selama dialog terbuka
+  const [session, setSession] = useState<ExperimentSession | null>(null);
+  useEffect(() => {
+    const s = new ExperimentSession();
+    setSession(s);
+    return () => s.dispose();
+  }, []);
 
   const availableVariables = useMemo(() => {
     const selected = new Set([dependent?.id, ...covariates.map((v) => v.id)]);
@@ -84,8 +100,9 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
     setHighlightedVariable(null);
   };
 
-  // OK: laporan SPSS (pipeline produksi, Enter + default) + kartu hasil eksperimen bila ada
+  // OK: analisis lengkap pada konfigurasi terpilih → tabel SPSS + laporan performa
   const handleOk = async () => {
+    if (!session) return;
     let prepared;
     try {
       prepared = prepareFromStores(dependent, covariates);
@@ -95,15 +112,15 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
     }
     setIsWriting(true);
     try {
-      const { experimentSections } = await writeExperimentOutput(prepared, results);
-      toast.success(
-        experimentSections > 0
-          ? "Binary Logistic output and experiment results written to the output viewer."
-          : "Binary Logistic output written to the output viewer (no experiment results yet)."
-      );
+      // Biarkan status "Running…" ter-render sebelum main thread mungkin terblokir (mode A/C)
+      await interRunPause();
+      const okRun = await session.runFull(mode, prepared.full, { coldWorkers });
+      if (okRun.error) throw new Error(okRun.error);
+      await writeExperimentOutput(prepared, results, okRun);
+      toast.success(`Binary Logistic output written (${MODES[mode].label}).`);
       onClose();
     } catch (err) {
-      toast.error(`Failed to write results: ${err instanceof Error ? err.message : String(err)}`);
+      toast.error(`Analysis failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsWriting(false);
     }
@@ -136,7 +153,7 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
                 onMoveToCovariates={handleMoveToCovariates}
                 onRemoveDependent={() => setDependent(null)}
                 onRemoveCovariate={(v) => setCovariates((prev) => prev.filter((c) => c.id !== v.id))}
-                disabled={busy}
+                disabled={busy || isWriting}
               />
             </TabsContent>
             {/* forceMount: batch dan worker tetap hidup saat pindah ke tab Variables */}
@@ -149,6 +166,12 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
                 dependent={dependent}
                 covariates={covariates}
                 active={activeTab === "experiment"}
+                session={session}
+                mode={mode}
+                onModeChange={setMode}
+                coldWorkers={coldWorkers}
+                onColdWorkersChange={setColdWorkers}
+                locked={isWriting}
                 onBusyChange={onBusyChange}
                 onResultsChange={onResultsChange}
               />
@@ -158,28 +181,28 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
       </div>
 
       <div className="px-6 py-3 border-t border-border flex items-center justify-between bg-secondary flex-shrink-0">
-        <span className="text-xs text-muted-foreground">
-          Method: Enter · default options · categorical: Indicator (Last)
+        <span className="text-xs text-muted-foreground" data-testid="bl-exp-ok-config">
+          OK: {MODES[mode].label} · Enter · default options
         </span>
         <div className="flex items-center space-x-4">
           <Button
             onClick={handleOk}
-            disabled={busy || isWriting || !dependent || covariates.length === 0}
+            disabled={busy || isWriting || !session || !dependent || covariates.length === 0}
             data-testid="bl-exp-ok"
           >
             {isWriting ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Writing...
+                Running...
               </>
             ) : (
               "OK"
             )}
           </Button>
-          <Button variant="outline" onClick={handleReset} disabled={busy}>
+          <Button variant="outline" onClick={handleReset} disabled={busy || isWriting}>
             Reset
           </Button>
-          <Button variant="outline" onClick={onClose} disabled={busy}>
+          <Button variant="outline" onClick={onClose} disabled={busy || isWriting}>
             Close
           </Button>
         </div>
