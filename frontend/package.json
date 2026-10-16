@@ -17,7 +17,8 @@
     "test:descriptive:unit": "jest components/Modals/Analyze/Descriptive/Descriptive/__tests__/ --verbose",
     "test:descriptive:worker": "jest components/Modals/Analyze/Descriptive/Descriptive/__tests__/DescriptiveWorkerConnection.test.ts components/Modals/Analyze/Descriptive/Descriptive/__tests__/DescriptivesWorkerIntegration.test.ts --verbose",
     "build:wasm": "powershell -Command \"cd components/Modals/Analyze/TimeSeries/wasm; wasm-pack build --target web; Copy-Item -Path pkg/timeseries* -Destination ../../../../../public/workers/TimeSeries/ -Force\"",
-    "build:wasm:experiment": "powershell -Command \"$ErrorActionPreference = 'Stop'; cd components/Modals/Analyze/Regression/BinaryLogistic/rust; wasm-pack build --target web --release --out-dir target/experiment-pkg; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; New-Item -ItemType Directory -Force -Path ../../../../../../public/workers/Regression/BinaryExperiment/pkg | Out-Null; Copy-Item -Path target/experiment-pkg/statify_logistic* -Destination ../../../../../../public/workers/Regression/BinaryExperiment/pkg/ -Force\""
+    "build:experiment": "powershell -Command \"$env:NEXT_PUBLIC_GIT_COMMIT = (git rev-parse --short HEAD); next build\"",
+    "build:wasm:experiment":"powershell -Command \"$ErrorActionPreference = 'Stop'; cd components/Modals/Analyze/Regression/BinaryLogistic/rust; wasm-pack build --target web --release --out-dir target/experiment-pkg; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; New-Item -ItemType Directory -Force -Path ../../../../../../public/workers/Regression/BinaryExperiment/pkg | Out-Null; Copy-Item -Path target/experiment-pkg/statify_logistic* -Destination ../../../../../../public/workers/Regression/BinaryExperiment/pkg/ -Force\""
   },
   "dependencies": {
     "@handsontable/react-wrapper": "^15.3.0",

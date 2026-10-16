@@ -93,6 +93,8 @@ export interface RunMetrics {
   longTaskTotalMs: number | null;
   heapUsedMB: number | null;
   wasmMemoryMB: number | null;
+  /** Tab tersembunyi kapan pun selama run (rAF berhenti → metrik frame tidak valid). */
+  pageHidden: boolean;
 }
 
 export interface RunRecord extends RunMetrics {
@@ -241,4 +243,36 @@ export interface ProductionComparison {
   iterationsExperiment: number;
   passed: boolean;
   tolerance: number;
+}
+
+// --- Hasil yang disimpan dialog (untuk tampilan dan tombol OK) ---
+
+export interface BatchOutcome {
+  records: RunRecord[];
+  meta: BatchMeta;
+  errorMessage: string | null;
+}
+
+export interface SingleRunResult {
+  record: RunRecord;
+  featureNames: string[];
+  resampled: boolean;
+  nOriginal: number;
+}
+
+export interface BatchResult {
+  outcome: BatchOutcome;
+  summaries: ModeSummary[];
+  accuracy: AccuracyRow[];
+  featureNames: string[];
+}
+
+export interface ComparisonResult {
+  comparisons: ProductionComparison[];
+}
+
+export interface ExperimentResults {
+  single: SingleRunResult | null;
+  batch: BatchResult | null;
+  comparison: ComparisonResult | null;
 }

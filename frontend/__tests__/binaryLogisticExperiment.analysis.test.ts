@@ -36,6 +36,7 @@ function rec(mode: ExperimentMode, N: number, e2eMs: number, beta: number[], ext
     longTaskTotalMs: 0,
     heapUsedMB: null,
     wasmMemoryMB: null,
+    pageHidden: false,
     result: { beta, se: beta.map((b) => Math.abs(b) / 10), neg2ll: 100, iterations: 4, converged: true, stepHalvings: 0, wasmCoreMs: null },
     error: null,
     timestamp: "2026-10-16T00:00:00.000Z",

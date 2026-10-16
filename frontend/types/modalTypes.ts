@@ -70,6 +70,7 @@ export enum ModalType {
     ModalCurveEstimation = "ModalCurveEstimation",
     ModalPartialLeastSquares = "ModalPartialLeastSquares",
     ModalBinaryLogistic = "ModalBinaryLogistic",
+    ModalBinaryLogisticExperiment = "ModalBinaryLogisticExperiment",
     ModalMultinomialLogistic = "ModalMultinomialLogistic",
     ModalOrdinal = "ModalOrdinal",
     ModalProbit = "ModalProbit",
@@ -276,6 +277,7 @@ export const MODAL_CATEGORIES: Record<ModalType, ModalCategory> = {
     [ModalType.ModalCurveEstimation]: ModalCategory.Regression,
     [ModalType.ModalPartialLeastSquares]: ModalCategory.Regression,
     [ModalType.ModalBinaryLogistic]: ModalCategory.Regression,
+    [ModalType.ModalBinaryLogisticExperiment]: ModalCategory.Regression,
     [ModalType.ModalMultinomialLogistic]: ModalCategory.Regression,
     [ModalType.ModalOrdinal]: ModalCategory.Regression,
     [ModalType.ModalProbit]: ModalCategory.Regression,
@@ -442,6 +444,8 @@ export function getModalTitle(type: ModalType): string {
             return "Curve Estimation";
         case ModalType.ModalBinaryLogistic:
             return "Binary Logistic Regression";
+        case ModalType.ModalBinaryLogisticExperiment:
+            return "Binary Logistic (Experiment)";
         case ModalType.ModalMultinomialLogistic:
             return "Multinomial Logistic Regression";
         case ModalType.ModalOrdinal:

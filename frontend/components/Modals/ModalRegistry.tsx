@@ -114,6 +114,12 @@ const ModalBinaryLogistic = lazy(() =>
     default: mod.BinaryLogisticMain as React.ComponentType<BaseModalProps>,
   }))
 );
+// Eksperimen 2×2 (JS vs Rust-Wasm × main thread vs Web Worker)
+const ModalBinaryLogisticExperiment = lazy(() =>
+  import("@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/dialogs/BinaryLogisticExperimentMain").then((mod) => ({
+    default: mod.BinaryLogisticExperimentMain as React.ComponentType<BaseModalProps>,
+  }))
+);
 
 
 const ModalMultinomialLogistic = lazy(() =>
@@ -195,6 +201,7 @@ export const MODAL_COMPONENTS: ModalComponentRegistry = {
   [ModalType.ModalCurveEstimation]: withSuspense(ModalCurveEstimation),
   [ModalType.ModalOrdinal]: withSuspense(ModalOrdinal),
   [ModalType.ModalBinaryLogistic]: withSuspense(ModalBinaryLogistic),
+  [ModalType.ModalBinaryLogisticExperiment]: withSuspense(ModalBinaryLogisticExperiment),
   [ModalType.ModalMultinomialLogistic]: withSuspense(ModalMultinomialLogistic),
 
   // Chart modals - lazy loaded
@@ -264,6 +271,7 @@ export const MODAL_CONTAINER_PREFERENCES: Partial<
   [ModalType.ModalLinear]: "sidebar",
   [ModalType.ModalCurveEstimation]: "sidebar",
   [ModalType.ModalBinaryLogistic]: "sidebar",
+  [ModalType.ModalBinaryLogisticExperiment]: "sidebar",
   [ModalType.ModalOrdinal]: "sidebar",
   [ModalType.ModalMultinomialLogistic]: "sidebar",
 };

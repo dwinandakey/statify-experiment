@@ -597,6 +597,13 @@ const HamburgerMenu: React.FC = () => {
                         </DrawerMenuItem>
                         <DrawerMenuItem
                           onClick={() =>
+                            openModal(ModalType.ModalBinaryLogisticExperiment)
+                          }
+                        >
+                          Binary Logistic (Experiment)...
+                        </DrawerMenuItem>
+                        <DrawerMenuItem
+                          onClick={() =>
                             openModal(ModalType.ModalMultinomialLogistic)
                           }
                         >

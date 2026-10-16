@@ -42,6 +42,7 @@ export function buildRunsCsv(records: RunRecord[], meta: BatchMeta, featureNames
     ["longTaskTotalMs", (r) => r.longTaskTotalMs],
     ["heapUsedMB", (r) => r.heapUsedMB],
     ["wasmMemoryMB", (r) => r.wasmMemoryMB],
+    ["pageHidden", (r) => r.pageHidden],
     ["iterations", (r) => r.result?.iterations ?? null],
     ["converged", (r) => r.result?.converged ?? null],
     ["stepHalvings", (r) => r.result?.stepHalvings ?? null],

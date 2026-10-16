@@ -14,6 +14,7 @@
  */
 import type {
   BatchMeta,
+  BatchOutcome,
   BatchProgress,
   BatchSettings,
   CoreResult,
@@ -33,6 +34,7 @@ import {
   captureEnvironment,
   heapUsedMB,
   interRunPause,
+  nextTask,
 } from "./metrics";
 import { resample } from "./prepareData";
 import { deriveSeed, mulberry32, shuffleInPlace } from "./prng";
@@ -285,6 +287,18 @@ function runOnWorker(
 
 // --- Satu run ---
 
+// Hitung perubahan visibilitas halaman: tab tersembunyi menghentikan rAF,
+// sehingga metrik frame run tersebut tidak valid dan perlu ditandai.
+let visibilityChanges = 0;
+let visibilityListenerInstalled = false;
+function ensureVisibilityListener(): void {
+  if (visibilityListenerInstalled || typeof document === "undefined") return;
+  document.addEventListener("visibilitychange", () => {
+    visibilityChanges++;
+  });
+  visibilityListenerInstalled = true;
+}
+
 export interface RunEnv {
   monitor: FrameMonitor;
   longTasks: LongTaskCollector;
@@ -309,9 +323,13 @@ interface PendingRun {
   windowEnd: number;
   heapUsedMB: number | null;
   wasmMemoryBytes: number | null;
+  pageHidden: boolean;
 }
 
 async function measureRun(mode: ExperimentMode, data: DatasetForRun, env: RunEnv): Promise<PendingRun> {
+  ensureVisibilityListener();
+  const visibilityAtStart = visibilityChanges;
+  const hiddenAtStart = document.hidden;
   const timestamp = new Date().toISOString();
   const { maxIter, tol } = env;
   let spawnMs: number | null = null;
@@ -335,8 +353,10 @@ async function measureRun(mode: ExperimentMode, data: DatasetForRun, env: RunEnv
   const X = data.X.slice();
   const y = data.y.slice();
 
-  // 3. Mulai monitor frame; dispatch tepat setelah frame baseline
+  // 3. Mulai monitor frame, lalu dispatch dari task baru tepat setelah frame
+  //    baseline selesai dirender (bukan dari dalam callback rAF)
   await env.monitor.start();
+  await nextTask();
   let t0 = performance.now();
   let t1 = t0;
   let computeMs = NaN;
@@ -395,6 +415,7 @@ async function measureRun(mode: ExperimentMode, data: DatasetForRun, env: RunEnv
     windowEnd,
     heapUsedMB: heap,
     wasmMemoryBytes,
+    pageHidden: hiddenAtStart || document.hidden || visibilityChanges !== visibilityAtStart,
   };
 }
 
@@ -447,6 +468,7 @@ function finalizeRun(pending: PendingRun, ctx: RecordContext, longTasks: LongTas
     longTaskTotalMs: lt ? lt.totalMs : null,
     heapUsedMB: pending.heapUsedMB,
     wasmMemoryMB: bytesToMB(pending.wasmMemoryBytes),
+    pageHidden: pending.pageHidden,
     result: pending.raw && !pending.error ? normalizeResult(pending.raw, pending.mode) : null,
     error: pending.error,
     timestamp: pending.timestamp,
@@ -457,12 +479,6 @@ function finalizeRun(pending: PendingRun, ctx: RecordContext, longTasks: LongTas
 
 export interface BatchCallbacks {
   onProgress: (progress: BatchProgress) => void;
-}
-
-export interface BatchOutcome {
-  records: RunRecord[];
-  meta: BatchMeta;
-  errorMessage: string | null;
 }
 
 export function totalBatchRuns(settings: Pick<BatchSettings, "sizes" | "warmup" | "repetitions">): number {

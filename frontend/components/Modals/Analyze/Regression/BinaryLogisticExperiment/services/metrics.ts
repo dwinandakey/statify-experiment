@@ -31,6 +31,23 @@ export function nextFrame(timeoutMs = 250): Promise<number | null> {
   });
 }
 
+/**
+ * Task baru (lewat MessageChannel, tanpa clamp setTimeout). Dipakai agar
+ * dispatch tidak terjadi di dalam callback rAF: kalau di sana, hasil worker
+ * selalu menunggu fase render frame tersebut selesai (overhead sistematis),
+ * padahal di aplikasi nyata komputasi dipicu dari task biasa (mis. klik).
+ */
+export function nextTask(): Promise<void> {
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      channel.port1.close();
+      resolve();
+    };
+    channel.port2.postMessage(null);
+  });
+}
+
 /** Jeda antar run: dua frame rAF + setTimeout 50 ms (UI sempat render, rAF berikutnya bersih). */
 export async function interRunPause(): Promise<void> {
   await nextFrame();
@@ -39,10 +56,16 @@ export async function interRunPause(): Promise<void> {
 }
 
 /**
- * Mencatat timestamp setiap callback requestAnimationFrame selama run.
+ * Mencatat waktu setiap callback requestAnimationFrame selama run.
  * start() resolve pada frame pertama (baseline); stop() menunggu SATU frame
  * lagi agar gap yang memuat blocking main thread ikut tercatat.
  * Jika tab tersembunyi (rAF tidak jalan), keduanya jatuh ke timeout.
+ *
+ * Yang dicatat adalah performance.now() saat callback BERJALAN, bukan argumen
+ * timestamp rAF. Di Chromium argumen itu adalah waktu BeginFrame (selaras
+ * vsync), yang bisa jauh lebih awal dari saat callback sempat dijalankan bila
+ * main thread macet. Akibatnya gap terkuantisasi ke kelipatan 16,7 ms dan
+ * meremehkan freeze (teramati: inti 62 ms → gap timestamp 50,0 ms).
  */
 export class FrameMonitor {
   private stamps: number[] = [];
@@ -56,9 +79,9 @@ export class FrameMonitor {
     this.running = true;
     return new Promise((resolve) => {
       const timer = setTimeout(resolve, timeoutMs);
-      const tick = (ts: number) => {
+      const tick = () => {
         if (!this.running) return;
-        this.stamps.push(ts);
+        this.stamps.push(performance.now());
         if (this.stamps.length === 1) {
           clearTimeout(timer);
           resolve();
