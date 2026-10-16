@@ -174,7 +174,12 @@ sehingga dataset N kecil adalah awalan (*prefix*) dari aliran indeks N besar.
 | `heapUsedMB` | `performance.memory.usedJSHeapSize` main thread setelah run (non-standar, Chromium; bernilai terkuantisasi). Heap worker tidak termasuk. |
 | `wasmMemoryMB` | `memory.buffer.byteLength` Wasm setelah run (C: main thread, D: worker). Memori linear tidak pernah menyusut, jadi ini *high-water mark*. |
 | `pageHidden` | (Tambahan) `true` bila tab tersembunyi kapan pun selama run; rAF berhenti di tab latar, jadi metrik frame run tersebut tidak valid. |
-| `beta`, `se`, `neg2ll`, `iterations`, `converged`, `stepHalvings` | Hasil inti untuk validasi akurasi (kolom `B_<nama>`, `SE_<nama>` di CSV). |
+| `beta`, `se`, `neg2ll`, `iterations`, `converged`, `stepHalvings` | Hasil inti untuk validasi akurasi (kolom `B_<nama>`, `SE_<nama>` di CSV). Untuk workload *full*, B dan S.E. diambil dari tabel *Variables in the Equation* dan `stepHalvings` kosong. |
+| `workload` | `core` (inti IRLS) atau `full` (analisis lengkap + tabel SPSS, §6 *Batch workload Full analysis*). |
+| `formatMs` | (Workload *full*) formatter SPSS produksi di main thread setelah hasil tersedia, termasuk penambahan `model_info`; di dalam jendela ukur, di luar `e2eMs`. |
+| `totalMs` | (Workload *full*) dispatch → tabel SPSS selesai diformat, kira-kira `e2eMs + formatMs`: waktu sampai laporan siap ditulis. |
+| `engineInitMs` | (Workload *full*) pemuatan mesin analisis lengkap sebelum timer: `logistic_enter.js` (A, B) atau `init()` wasm (C, D); ≈ 0 bila sudah dimuat. Untuk worker warm dicatat sekali per batch (`warmEngineInitMs*`). |
+| `tablesHash`, `tablesIdenticalToD` | (Workload *full*) hash cyrb53 isi tabel SPSS run itu, dan apakah sama dengan run sukses pertama mode D pada N yang sama. |
 
 Metadata lingkungan (di setiap baris CSV dan di `meta.json`): `userAgent`,
 `hardwareConcurrency`, `deviceMemory`, `crossOriginIsolated`, waktu mulai,
@@ -185,9 +190,20 @@ selisih positif terkecil antar pembacaan).
 
 ## 6. Prosedur benchmark
 
-Untuk setiap ukuran N (urut naik):
+Batch punya dua **workload** (pilihan *Workload* di bagian batch):
 
-1. Dataset N dibentuk sekali (`resample`, seed batch).
+- **IRLS core** (default): inti IRLS yang identik baris demi baris di JS dan
+  Rust, yaitu kontras 2×2 yang bersih untuk artikel.
+- **Full analysis + SPSS tables**: pipeline tombol OK di setiap run (lihat
+  *Batch workload Full analysis* di bawah).
+
+Hasil batch terakhir per workload disimpan terpisah di dialog; keduanya ikut
+ditulis tombol OK. Prosedur berikut sama untuk kedua workload. Untuk setiap
+ukuran N (urut naik):
+
+1. Dataset N dibentuk sekali (`resample`, seed batch). Workload *full* memakai
+   `resampleFull` pada kovariat mentah dengan seed yang sama, sehingga indeks
+   barisnya identik dengan dataset workload *core*.
 2. **Warm-up**: `W` ronde (default 5), tidak dicatat. Setiap ronde menjalankan
    keempat mode sekali. Warm-up diulang per N agar JIT/tier-up (V8 TurboFan
    untuk JS, Liftoff → TurboFan untuk Wasm) dan alokator memori berada pada
@@ -219,7 +235,8 @@ Untuk setiap ukuran N (urut naik):
 
 Total run = |N| × (W + R) × 4. Ringkasan per (N, mode): median, IQR (Q1–Q3,
 kuantil tipe 7 seperti default R/NumPy), min, dan max untuk `computeMs`,
-`e2eMs`, dan `maxFrameGapMs`, plus chart median dengan whisker IQR.
+`e2eMs`, dan `maxFrameGapMs` (workload *full*: juga `formatMs` dan `totalMs`),
+plus chart median dengan whisker IQR.
 
 ### Penyajian hasil: dialog vs output viewer
 
@@ -237,19 +254,30 @@ kuantil tipe 7 seperti default R/NumPy), min, dan max untuk `computeMs`,
      `formatBinaryLogisticResult`, sintaks `generateLogisticRegressionSyntax`,
      dan pengelompokan komponen yang sama dengan `BinaryLogisticMain.tsx`.
      Catatan kartu menyebut konfigurasinya, mis.
-     `Method: Enter · computed with B. JavaScript – Web Worker`.
-  2. **"Binary Logistic (Experiment): 2×2 performance"**: tabel performa run OK
-     tersebut (*Analysis run (OK)*), lalu, bila ada di sesi dialog itu,
-     ringkasan Run once, batch (median [Q1–Q3]), akurasi antar mode, dan
-     selisih tiap mode terhadap produksi.
+     `Method: Enter · computed with B. JavaScript – Web Worker`. Kartu ini
+     bisa dimatikan dengan kotak *Include the SPSS tables when pressing OK*
+     (OK lalu hanya menulis laporan performa).
+  2. **"Binary Logistic (Experiment): 2×2 performance"**: tabel
+     *Analysis run performance – \<konfigurasi\>* untuk run OK tersebut, lalu,
+     bila ada, ringkasan Run once, batch *IRLS core*, batch *full analysis*
+     (median [Q1–Q3] dan akurasi antar mode, termasuk jumlah run yang tabel
+     SPSS-nya identik dengan mode D), dan selisih tiap mode terhadap produksi.
+- **Dialog tetap terbuka setelah OK** (berbeda dengan dialog produksi), jadi
+  OK bisa diulang dengan konfigurasi lain; status di footer menghitung output
+  yang sudah ditulis dan app berpindah ke halaman Result di panel utama.
+- **Memori dialog.** Pilihan variabel, konfigurasi, pengaturan batch, hasil
+  Run once/batch/perbandingan, dan status OK diingat selama halaman belum
+  di-reload, juga saat dialog ditutup atau tertimpa dialog lain
+  (`hooks/useDialogMemory.ts`). Memori dikosongkan bila dataset berganti
+  (jumlah baris atau daftar variabel berbeda). Reload halaman memulai dari awal.
 
 ### Tombol OK: analisis lengkap pada konfigurasi terpilih
 
-Run once dan batch hanya menjalankan inti IRLS (B, S.E., −2LL) agar
-perbandingan waktunya adil. Tabel SPSS juga butuh Block 0, score test,
+Run once dan batch *IRLS core* hanya menjalankan inti IRLS (B, S.E., −2LL)
+agar perbandingan waktunya adil. Tabel SPSS juga butuh Block 0, score test,
 omnibus test, pseudo-R², classification table, Wald, dan CI, sehingga tombol OK
-menjalankan **analisis Binary Logistic lengkap** (metode Enter, opsi default)
-dengan mesin sesuai konfigurasi yang dipilih:
+(dan batch workload *full*) menjalankan **analisis Binary Logistic lengkap**
+(metode Enter, opsi default) dengan mesin sesuai konfigurasi yang dipilih:
 
 | Mode | Mesin | Tempat |
 |---|---|---|
@@ -274,9 +302,14 @@ dengan mesin sesuai konfigurasi yang dipilih:
   setara untuk Hessian yang simetris (lihat §10).
 - Kedua mesin menerima input yang sama dengan worker produksi: X mentah n×k
   row-major (kode kategori, bukan dummy), y 0/1, `configJson` produksi, dan
-  nama kovariat. `model_info` (encoding Y/X, jumlah kasus, nama variabel)
-  ditambahkan di main thread seperti worker produksi, di luar timer.
-- Aturan pengukuran sama dengan run inti (§6.4): mesin dimuat/worker
+  nama kovariat.
+- Setelah hasil tersedia di main thread, `model_info` (encoding Y/X, jumlah
+  kasus, nama variabel) ditambahkan seperti worker produksi dan tabel SPSS
+  dibentuk dengan formatter produksi (`services/spssFormat.ts`), untuk keempat
+  mode di main thread seperti `handleAnalyze` produksi. Langkah ini masih di
+  dalam jendela ukur (`formatMs`, `totalMs`), sehingga gap frame juga
+  mencakup pembentukan tabel.
+- Aturan pengukuran lain sama dengan run inti (§6.4): mesin dimuat/worker
   disiapkan dan buffer disalin **sebelum** timer, dispatch dari task baru,
   monitor frame dan long task di jendela yang sama. Opsi *fresh worker per
   run (cold)* juga berlaku untuk OK.
@@ -290,12 +323,39 @@ Metrik pada kartu *Analysis run (OK)*:
 | `engineInitMs` | Pemuatan mesin sebelum timer: `import()` `logistic_enter.js` (A, B di dalam worker) atau `init()` wasm (C, D). ≈ 0 bila sudah dimuat sebelumnya di halaman/worker itu. |
 | `spawnMs`, `initMs` | Hanya bila run OK ini membuat worker baru (cold, atau worker warm pertama di dialog). |
 | `maxFrameGapMs`, `droppedFrames`, `longTasks`, `heapUsedMB`, `wasmMemoryMB` | Seperti §5. |
-| `formatMs` | `formatBinaryLogisticResult` produksi di main thread (sama untuk keempat mode, di luar `e2eMs`). |
-| `saveMs` | Penulisan log + tabel SPSS ke store hasil (IndexedDB), di luar `e2eMs`. |
+| `formatMs` | `formatBinaryLogisticResult` produksi di main thread (sama untuk keempat mode); di dalam jendela ukur, di luar `e2eMs`. |
+| `totalMs` | Dispatch → tabel SPSS selesai diformat. |
+| `saveMs` | Penulisan tabel SPSS ke store hasil (IndexedDB), di luar jendela ukur; tidak ada bila tabel SPSS tidak ditulis. |
 
 Satu klik OK adalah **satu run tanpa warm-up**: berguna untuk demonstrasi dan
 untuk memastikan keempat konfigurasi menghasilkan laporan yang sama, bukan
-untuk inferensi. Data artikel tetap diambil dari batch (CSV).
+untuk inferensi. Untuk mengukur pipeline OK secara berulang, pakai batch
+workload *full* di bawah.
+
+### Batch workload *Full analysis*
+
+Batch dengan workload **Full analysis + SPSS tables** menjalankan pipeline
+tombol OK di setiap run, dengan prosedur batch yang sama (warm-up, ulangan,
+urutan mode acak, jeda antar run, opsi cold):
+
+1. Mesin analisis lengkap per mode (tabel di atas) menghitung hasil.
+2. Tabel SPSS dibentuk dengan formatter produksi di main thread, di dalam
+   jendela ukur (`formatMs`, `totalMs`).
+3. Di luar jendela ukur, isi tabel di-hash (cyrb53 dari JSON section) lalu
+   tabelnya dibuang. **Tidak ada yang ditulis ke output viewer selama batch**,
+   jadi batch tidak menghasilkan ratusan laporan SPSS.
+
+Validasi per N: B dan S.E. dari tabel *Variables in the Equation* dibandingkan
+dengan run sukses pertama mode D (selisih absolut dan berskala
+\|Δ\| / max(1, \|nilai\|)), dan hash tabel SPSS setiap run dibandingkan dengan
+hash run acuan itu (kolom *SPSS tables* di dialog, `tablesIdenticalToD` di
+CSV). Lulus bila semua tabel identik dan selisih berskala < 1e-8.
+
+Worker warm memuat mesinnya sekali sebelum batch (`warmEngineInitMsB/D` di
+CSV). Klik **OK** setelah batch untuk menulis ringkasan dan akurasinya ke
+kartu eksperimen; data per run tetap lewat **Download CSV**. Waktu workload
+*full* membandingkan port JS dengan kode Rust produksi, jadi bukan kontras
+teknologi yang bersih (lihat §10).
 
 ## 7. Validasi akurasi
 
@@ -307,7 +367,9 @@ untuk inferensi. Data artikel tetap diambil dari batch (CSV).
 | Antar mode (UI) | Per N: max \|Δβ\| dan max \|ΔSE\| tiap mode terhadap run pertama mode D, atas semua ulangan | kriteria < 1e-8 |
 | Terhadap produksi (UI) | Tombol *Compare with production*: `calculate_binary_logistic` (Enter, opsi default, kategorik Indicator/Last) lewat worker produksi pada data N asli; baris "Constant" ↔ kolom intercept, kovariat dan dummy (`nama(j)`) dicocokkan lewat nama, baris omnibus grup kategorik dilewati | kriteria < 1e-4 |
 | Port JS analisis lengkap | `scripts/checkEnterParity.mjs` (juga dijalankan Jest lewat `logisticEnterParity.experiment.test.js`): seluruh objek hasil `logistic_enter.js` vs `calculate_binary_logistic` Rust (paket eksperimen via `initSync`) pada 7 dataset: numerik, kategorik, step-halving + separasi, hampir separasi, kolinear sempurna, kolom nol, kategorik kecil. Semua field dibandingkan, termasuk pesan peringatan | lulus; selisih berskala maks 7,3e-14 (kriteria \|Δ\| ≤ 1e-8 · max(1, \|a\|, \|b\|)) |
-| Output viewer (E2E) | Tombol OK di keempat konfigurasi (D, A, B, C) vs dialog Binary Logistic produksi untuk data dan variabel yang sama | header komponen, isi tabel, dan sintaks identik untuk keempat mode |
+| Batch analisis lengkap (UI) | Per N: hash tabel SPSS tiap run vs run pertama mode D, plus selisih berskala B/S.E. dari *Variables in the Equation* | kriteria: semua tabel identik dan selisih berskala < 1e-8 |
+| Pipeline tabel SPSS (Jest) | `binaryLogisticExperiment.spssFormat.test.ts`: `logistic_enter.js` + formatter produksi pada data sintetis kategorik; ekstraksi B/S.E. vs `irlsCore` pada design matrix yang sama; hash deterministik; `toProductionPayload` | lulus; B/S.E. selisih < 1e-8 terhadap inti IRLS |
+| Output viewer (E2E) | Tombol OK di keempat konfigurasi (D, A, B, C) pada dialog yang sama vs dialog Binary Logistic produksi untuk data dan variabel yang sama; batch *full* kecil; OK tanpa tabel SPSS; Close lalu buka lagi | header komponen, isi tabel, dan sintaks identik untuk keempat mode; tabel batch *full* identik di semua run; state dialog tetap ada |
 
 Kasus step-halving di golden test dipilih dengan sengaja: semua perbandingan
 log-likelihood pada kasus itu jauh di atas noise pembulatan (penurunan LL 0,55%
@@ -382,13 +444,17 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
 6. Biarkan tab **tetap terlihat** dan jangan berinteraksi selama batch: rAF
    berhenti di tab latar (run seperti ini ditandai `pageHidden = true`).
 7. Pengaturan baku: warm-up 5, ulangan 30, seed dicatat, ukuran N asli +
-   10.000 + 50.000 + 100.000. Ulangi batch dengan opsi *cold* bila ingin
-   mengukur biaya pembuatan worker.
+   10.000 + 50.000 + 100.000, workload *IRLS core*. Ulangi batch dengan opsi
+   *cold* bila ingin mengukur biaya pembuatan worker, dan dengan workload
+   *Full analysis + SPSS tables* bila ingin mengukur pipeline tombol OK
+   (analisis lengkap + tabel SPSS) secara berulang.
 8. Unduh **CSV** (satu baris per run) dan **meta.json** setelah setiap batch.
-   Pastikan tabel akurasi lulus (< 1e-8) dan *Compare with production* lulus (< 1e-4).
+   Pastikan tabel akurasi lulus (< 1e-8; workload *full*: semua tabel SPSS
+   identik) dan *Compare with production* lulus (< 1e-4).
    Pilih konfigurasi lalu klik **OK** untuk menjalankan analisis lengkap pada
    konfigurasi itu dan menyimpan laporan SPSS + kartu performa (dan ringkasan
-   batch) ke output viewer (lihat §6, *Tombol OK*).
+   kedua batch) ke output viewer (lihat §6, *Tombol OK*). Dialog tetap
+   terbuka; matikan *Include the SPSS tables* bila hanya perlu laporan performa.
 9. Untuk rekaman demo freeze: pilih mode A atau C, N = 100.000, lalu *Run once*.
    Indikator responsivitas (bar + FPS) digerakkan rAF di main thread, jadi bar
    berhenti selama inti berjalan; ulangi dengan B/D untuk pembanding.

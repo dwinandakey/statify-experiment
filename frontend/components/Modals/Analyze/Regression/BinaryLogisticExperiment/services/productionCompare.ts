@@ -3,12 +3,10 @@
  * (metode Enter, opsi default dialog produksi) lewat worker produksi
  * /workers/Regression/binaryLogistic.worker.js pada data N asli.
  *
- * Dipakai untuk dua hal:
- * - "Compare with production": B dan S.E. produksi dibandingkan dengan hasil
- *   inti eksperimen (baris "Constant" ↔ kolom intercept, kolom lain lewat nama,
- *   termasuk dummy `nama(j)`; baris grup kategorik tanpa B dilewati);
- * - tombol OK: payload lengkapnya diformat dengan formatter produksi
- *   sehingga output viewer identik dengan modul Binary Logistic asli.
+ * Dipakai oleh "Compare with production": B dan S.E. produksi dibandingkan
+ * dengan hasil inti eksperimen (baris "Constant" ↔ kolom intercept, kolom lain
+ * lewat nama, termasuk dummy `nama(j)`; baris grup kategorik tanpa B dilewati).
+ * Tombol OK tidak memakai worker ini; lihat outputWriter.ts dan spssFormat.ts.
  *
  * Worker produksi melakukan data prep-nya sendiri (listwise deletion,
  * encoding Y, kovariat, dummy coding) dari data mentah store, sama seperti
@@ -31,7 +29,7 @@ export interface ProductionEnterResult {
   neg2ll: number | null;
   iterations: number | null;
   converged: boolean | null;
-  /** Payload lengkap worker produksi (LogisticResult + model_info) untuk formatter. */
+  /** Payload lengkap worker produksi (LogisticResult + model_info). */
   payload: LogisticResult;
 }
 

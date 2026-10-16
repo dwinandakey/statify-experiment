@@ -15,12 +15,20 @@ import {
 import type { ExperimentMode, ModeSummary, SummaryStats } from "../types/experiment";
 import { fmtInt, fmtMs } from "../services/format";
 
-export type ChartMetric = "e2eMs" | "computeMs" | "maxFrameGapMs";
+export type ChartMetric = "e2eMs" | "computeMs" | "maxFrameGapMs" | "totalMs" | "formatMs";
 
 export const CHART_METRIC_LABEL: Record<ChartMetric, string> = {
   e2eMs: "End-to-end (e2eMs)",
   computeMs: "Compute (computeMs)",
   maxFrameGapMs: "Max frame gap (maxFrameGapMs)",
+  totalMs: "Incl. SPSS tables (totalMs)",
+  formatMs: "SPSS formatting (formatMs)",
+};
+
+/** Metrik yang tersedia per workload (formatMs/totalMs hanya untuk analisis lengkap). */
+export const CHART_METRICS: Record<"core" | "full", ChartMetric[]> = {
+  core: ["e2eMs", "computeMs", "maxFrameGapMs"],
+  full: ["totalMs", "e2eMs", "computeMs", "formatMs", "maxFrameGapMs"],
 };
 
 /*

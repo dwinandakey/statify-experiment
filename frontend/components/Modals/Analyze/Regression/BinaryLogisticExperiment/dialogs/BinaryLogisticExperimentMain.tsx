@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import { covariateRejectionReason, prepareFromStores } from "../services/prepare
 import { writeExperimentOutput } from "../services/outputWriter";
 import { ExperimentSession } from "../services/runner";
 import { interRunPause } from "../services/metrics";
+import { datasetSignature, syncDialogMemory, useDialogMemory } from "../hooks/useDialogMemory";
 import { VariablesTab } from "./VariablesTab";
 import { ExperimentTab } from "./ExperimentTab";
 
@@ -23,28 +24,42 @@ import { ExperimentTab } from "./ExperimentTab";
  * (JavaScript vs Rust-Wasm × main thread vs Web Worker) untuk regresi
  * logistik biner. Lihat ../EXPERIMENT.md.
  *
- * - Run once / batch (tab Experiment) mengukur inti IRLS.
+ * - Run once / batch (tab Experiment) mengukur inti IRLS atau analisis lengkap.
  * - OK menjalankan analisis Binary Logistic lengkap (Enter, opsi default) pada
- *   konfigurasi terpilih dan menulis tabel SPSS + laporan performa.
+ *   konfigurasi terpilih dan menulis tabel SPSS + laporan performa. Dialog
+ *   tetap terbuka (berbeda dengan dialog produksi) agar OK bisa diulang
+ *   dengan konfigurasi lain; pilihan dan hasil diingat walau dialog ditutup.
  *
- * Modul Binary Logistic produksi tidak disentuh; worker, formatter, dan
- * syntax generator produksi hanya dipakai ulang (read-only).
+ * Modul Binary Logistic produksi tidak disentuh; formatter dan syntax
+ * generator produksi hanya dipakai ulang (read-only).
  */
-const EMPTY_RESULTS: ExperimentResults = { single: null, batch: null, comparison: null };
+const EMPTY_RESULTS: ExperimentResults = { single: null, batches: { core: null, full: null }, comparison: null };
 
 export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
   const variablesFromStore = useVariableStore((state) => state.variables);
   const data = useDataStore((state) => state.data);
 
-  const [activeTab, setActiveTab] = useState("variables");
-  const [dependent, setDependent] = useState<Variable | null>(null);
-  const [covariates, setCovariates] = useState<Variable[]>([]);
+  // Memori dialog dikosongkan bila dataset berganti; harus sebelum state di bawah dibaca
+  const memorySynced = useRef(false);
+  if (!memorySynced.current) {
+    syncDialogMemory(datasetSignature(variablesFromStore, data.length));
+    memorySynced.current = true;
+  }
+
+  const [activeTab, setActiveTab] = useDialogMemory("activeTab", "variables");
+  const [dependent, setDependent] = useDialogMemory<Variable | null>("dependent", null);
+  const [covariates, setCovariates] = useDialogMemory<Variable[]>("covariates", []);
   const [highlightedVariable, setHighlightedVariable] = useState<Variable | null>(null);
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<ExperimentResults>(EMPTY_RESULTS);
   const [isWriting, setIsWriting] = useState(false);
-  const [mode, setMode] = useState<ExperimentMode>("A");
-  const [coldWorkers, setColdWorkers] = useState(false);
+  const [mode, setMode] = useDialogMemory<ExperimentMode>("mode", "A");
+  const [coldWorkers, setColdWorkers] = useDialogMemory("coldWorkers", false);
+  const [includeSpss, setIncludeSpss] = useDialogMemory("includeSpss", true);
+  const [lastOk, setLastOk] = useDialogMemory<{ count: number; mode: ExperimentMode; includeSpss: boolean } | null>(
+    "lastOk",
+    null
+  );
 
   // Sesi (monitor frame, observer long task, worker) hidup selama dialog terbuka
   const [session, setSession] = useState<ExperimentSession | null>(null);
@@ -100,7 +115,7 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
     setHighlightedVariable(null);
   };
 
-  // OK: analisis lengkap pada konfigurasi terpilih → tabel SPSS + laporan performa
+  // OK: analisis lengkap pada konfigurasi terpilih → tabel SPSS + laporan performa; dialog tetap terbuka
   const handleOk = async () => {
     if (!session) return;
     let prepared;
@@ -114,11 +129,13 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
     try {
       // Biarkan status "Running…" ter-render sebelum main thread mungkin terblokir (mode A/C)
       await interRunPause();
-      const okRun = await session.runFull(mode, prepared.full, { coldWorkers });
+      const okRun = await session.runFull(mode, prepared, { coldWorkers });
       if (okRun.error) throw new Error(okRun.error);
-      await writeExperimentOutput(prepared, results, okRun);
-      toast.success(`Binary Logistic output written (${MODES[mode].label}).`);
-      onClose();
+      await writeExperimentOutput(prepared, results, okRun, { includeSpss });
+      setLastOk((prev) => ({ count: (prev?.count ?? 0) + 1, mode, includeSpss }));
+      toast.success(
+        `${includeSpss ? "SPSS tables and performance report" : "Performance report"} written (${MODES[mode].label}).`
+      );
     } catch (err) {
       toast.error(`Analysis failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -171,6 +188,8 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
                 onModeChange={setMode}
                 coldWorkers={coldWorkers}
                 onColdWorkersChange={setColdWorkers}
+                includeSpss={includeSpss}
+                onIncludeSpssChange={setIncludeSpss}
                 locked={isWriting}
                 onBusyChange={onBusyChange}
                 onResultsChange={onResultsChange}
@@ -180,10 +199,19 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
         </Tabs>
       </div>
 
-      <div className="px-6 py-3 border-t border-border flex items-center justify-between bg-secondary flex-shrink-0">
-        <span className="text-xs text-muted-foreground" data-testid="bl-exp-ok-config">
-          OK: {MODES[mode].label} · Enter · default options
-        </span>
+      <div className="px-6 py-3 border-t border-border flex flex-wrap items-center justify-between gap-2 bg-secondary flex-shrink-0">
+        <div className="min-w-0 text-xs text-muted-foreground">
+          <div data-testid="bl-exp-ok-config">
+            OK: {MODES[mode].label} · Enter · default options ·{" "}
+            {includeSpss ? "SPSS tables + performance" : "performance only"}
+          </div>
+          {lastOk && (
+            <div data-testid="bl-exp-ok-status" data-count={lastOk.count}>
+              Written {lastOk.count}× · last: {MODES[lastOk.mode].label}
+              {lastOk.includeSpss ? "" : " (performance only)"} · see the output viewer
+            </div>
+          )}
+        </div>
         <div className="flex items-center space-x-4">
           <Button
             onClick={handleOk}
@@ -199,10 +227,10 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
               "OK"
             )}
           </Button>
-          <Button variant="outline" onClick={handleReset} disabled={busy || isWriting}>
+          <Button variant="outline" onClick={handleReset} disabled={busy || isWriting} data-testid="bl-exp-reset">
             Reset
           </Button>
-          <Button variant="outline" onClick={onClose} disabled={busy || isWriting}>
+          <Button variant="outline" onClick={onClose} disabled={busy || isWriting} data-testid="bl-exp-close">
             Close
           </Button>
         </div>

@@ -15,7 +15,7 @@ import type { DataRow } from "@/types/Data";
 import type { Variable } from "@/types/Variable";
 import { useDataStore } from "@/stores/useDataStore";
 import { useVariableStore } from "@/stores/useVariableStore";
-import type { CategoricalCoding, DatasetForRun, PreparedData } from "../types/experiment";
+import type { CategoricalCoding, DatasetForRun, FullAnalysisInput, PreparedData } from "../types/experiment";
 import { mulberry32 } from "./prng";
 
 /**
@@ -345,4 +345,22 @@ export function resample(
     yr[i] = y[src];
   }
   return { X: Xr, y: yr, n: targetN, p, resampled: true };
+}
+
+/**
+ * Resampling input analisis lengkap (kovariat mentah, kode kategori). Dengan
+ * seed yang sama indeks barisnya identik dengan resample() pada design
+ * matrix, jadi batch "core" dan "full" memproses baris yang sama untuk
+ * (N, seed) yang sama. Data hasil resampling tidak punya missing.
+ */
+export function resampleFull(input: FullAnalysisInput, targetN: number, seed: number): FullAnalysisInput {
+  const d = resample(input.X, input.y, input.rows, input.cols, targetN, seed);
+  if (!d.resampled) return input;
+  return {
+    ...input,
+    X: d.X,
+    y: d.y,
+    rows: d.n,
+    modelInfo: { ...input.modelInfo, n_samples: d.n, n_missing: 0 },
+  };
 }

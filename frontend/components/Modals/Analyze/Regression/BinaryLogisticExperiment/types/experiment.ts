@@ -1,4 +1,5 @@
 import type { Variable } from "@/types/Variable";
+import type { BinaryLogisticOutput } from "@/components/Modals/Analyze/Regression/BinaryLogistic/types/binary-logistic";
 
 // --- Konfigurasi faktorial 2×2 ---
 
@@ -24,6 +25,19 @@ export const MODE_ORDER: ExperimentMode[] = ["A", "B", "C", "D"];
 // Acuan validasi akurasi antar mode (konfigurasi produksi Statify)
 export const REFERENCE_MODE: ExperimentMode = "D";
 
+/**
+ * Beban kerja yang diukur:
+ * - "core": inti IRLS (B, S.E., −2LL), identik di JS dan Rust (Run once, batch);
+ * - "full": analisis Binary Logistic lengkap + format tabel SPSS, sama dengan
+ *   tombol OK (A/B: logistic_enter.js, C/D: calculate_binary_logistic).
+ */
+export type Workload = "core" | "full";
+
+export const WORKLOAD_LABEL: Record<Workload, string> = {
+  core: "IRLS core",
+  full: "Full analysis + SPSS tables",
+};
+
 // --- Algoritma ---
 
 export const DEFAULT_MAX_ITER = 20;
@@ -36,7 +50,8 @@ export interface CoreResult {
   neg2ll: number;
   iterations: number;
   converged: boolean;
-  stepHalvings: number;
+  /** Jumlah step-halving inti IRLS; null untuk analisis lengkap (tidak dilaporkan). */
+  stepHalvings: number | null;
   /** Durasi irls_core murni di dalam Wasm (mode C/D), null untuk JS. */
   wasmCoreMs: number | null;
 }
@@ -136,6 +151,7 @@ export interface RunMetrics {
 
 export interface RunRecord extends RunMetrics {
   batchId: string;
+  workload: Workload;
   /** Nomor urut run dalam batch (1-based, hanya run yang dicatat). */
   runIndex: number;
   phase: "measure" | "single";
@@ -147,6 +163,15 @@ export interface RunRecord extends RunMetrics {
   orderInRep: number;
   mode: ExperimentMode;
   workerStart: WorkerStart | null;
+  /** Workload "full": pemuatan mesin analisis lengkap sebelum timer (≈ 0 bila sudah dimuat). */
+  engineInitMs: number | null;
+  /** Workload "full": formatter SPSS produksi di main thread, di dalam jendela ukur. */
+  formatMs: number | null;
+  /** Workload "full": dispatch → tabel SPSS selesai diformat di main thread. */
+  totalMs: number | null;
+  /** Workload "full": hash isi tabel SPSS (validasi: identik dengan mode D). */
+  tablesHash: string | null;
+  /** B dan S.E. (analisis lengkap: dari tabel Variables in the Equation). */
   result: CoreResult | null;
   error: string | null;
   /** Waktu mulai run (ISO). */
@@ -167,14 +192,21 @@ export interface FullRunRecord extends RunMetrics {
   workerCreated: boolean;
   /** Pemuatan mesin analisis lengkap di luar timer (import logistic_enter.js / wasm init). */
   engineInitMs: number | null;
+  /** Formatter SPSS produksi di main thread (di dalam jendela ukur). */
+  formatMs: number | null;
+  /** Dispatch → tabel SPSS selesai diformat. */
+  totalMs: number | null;
   /** Objek hasil mentah mesin (struktur LogisticResult produksi), null bila gagal. */
   result: unknown;
+  /** Tabel SPSS hasil formatter produksi, siap ditulis ke output viewer. */
+  formatted: BinaryLogisticOutput | null;
   error: string | null;
 }
 
 // --- Batch ---
 
 export interface BatchSettings {
+  workload: Workload;
   sizes: number[];
   warmup: number;
   repetitions: number;
@@ -208,6 +240,8 @@ export interface InitTimings {
 export interface WarmWorkerInit {
   spawnMs: number;
   initMs: number;
+  /** Workload "full": pemuatan mesin analisis lengkap di worker (logistic_enter.js / wasm). */
+  engineInitMs?: number;
 }
 
 export interface EnvironmentMeta {
@@ -242,6 +276,8 @@ export interface BatchMeta {
     nTotalRows: number;
     nMissing: number;
     p: number;
+    /** Kolom kovariat mentah (input analisis lengkap). */
+    cols: number;
   };
   /** Urutan mode yang dipakai tiap (N, ulangan); untuk audit pengacakan. */
   orders: { N: number; rep: number; order: ExperimentMode[] }[];
@@ -267,6 +303,9 @@ export interface ModeSummary {
   computeMs: SummaryStats | null;
   e2eMs: SummaryStats | null;
   maxFrameGapMs: SummaryStats | null;
+  /** Workload "full" saja (null untuk "core"). */
+  formatMs: SummaryStats | null;
+  totalMs: SummaryStats | null;
 }
 
 export interface AccuracyRow {
@@ -275,8 +314,12 @@ export interface AccuracyRow {
   /** max |beta(mode) - beta(D)| atas semua run mode tsb pada N ini. */
   maxAbsDiffBeta: number;
   maxAbsDiffSe: number;
+  /** max |Δ| / max(1, |nilai|) atas B dan S.E. (kriteria workload "full"). */
+  maxScaledDiff: number;
   iterations: number | null;
   stepHalvings: number | null;
+  /** Workload "full": run yang tabel SPSS-nya identik dengan run pertama mode D. */
+  tablesIdentical: { identical: number; total: number } | null;
 }
 
 export interface ProductionComparisonRow {
@@ -329,8 +372,11 @@ export interface ComparisonResult {
   comparisons: ProductionComparison[];
 }
 
+/** Batch terakhir per workload (keduanya bisa ada dan ikut ditulis tombol OK). */
+export type BatchResults = Record<Workload, BatchResult | null>;
+
 export interface ExperimentResults {
   single: SingleRunResult | null;
-  batch: BatchResult | null;
+  batches: BatchResults;
   comparison: ComparisonResult | null;
 }

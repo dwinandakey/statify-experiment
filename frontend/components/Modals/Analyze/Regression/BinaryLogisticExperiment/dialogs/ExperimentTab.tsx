@@ -14,15 +14,16 @@ import { useVariableStore } from "@/stores/useVariableStore";
 import type { Variable } from "@/types/Variable";
 import type {
   BatchProgress,
-  BatchResult,
+  BatchResults,
   BatchSettings,
   ComparisonResult,
   ExperimentMode,
   ExperimentResults,
   ProductionComparison,
   SingleRunResult,
+  Workload,
 } from "../types/experiment";
-import { DEFAULT_MAX_ITER, DEFAULT_TOL, MODES, MODE_ORDER } from "../types/experiment";
+import { DEFAULT_MAX_ITER, DEFAULT_TOL, MODES, MODE_ORDER, WORKLOAD_LABEL } from "../types/experiment";
 import { prepareExperimentData, resample } from "../services/prepareData";
 import { type ExperimentSession, errorMessage, getMainThreadInit, totalBatchRuns, validateSettings } from "../services/runner";
 import { computeAccuracy, computeSummaries, worstAccuracyByN } from "../services/analysis";
@@ -30,17 +31,10 @@ import { buildMetaJson, buildRunsCsv, downloadText } from "../services/exportCsv
 import { compareWithProduction, runProductionEnter } from "../services/productionCompare";
 import { interRunPause } from "../services/metrics";
 import { fmtDiff, fmtDuration, fmtInt } from "../services/format";
+import { useDialogMemory } from "../hooks/useDialogMemory";
 import { ResponsivenessIndicator } from "./ResponsivenessIndicator";
-import { BatchChart, CHART_METRIC_LABEL, type ChartMetric } from "./BatchChart";
-import {
-  AccuracyTable,
-  CoefficientsTable,
-  MODE_AGREEMENT_TOL,
-  PassBadge,
-  ProductionTable,
-  RunMetricsTable,
-  SummaryTable,
-} from "./ResultTables";
+import { BatchChart, CHART_METRIC_LABEL, CHART_METRICS, type ChartMetric } from "./BatchChart";
+import { AccuracyTable, CoefficientsTable, PassBadge, ProductionTable, RunMetricsTable, SummaryTable } from "./ResultTables";
 
 interface ExperimentTabProps {
   dependent: Variable | null;
@@ -54,6 +48,9 @@ interface ExperimentTabProps {
   onModeChange: (mode: ExperimentMode) => void;
   coldWorkers: boolean;
   onColdWorkersChange: (cold: boolean) => void;
+  /** OK menulis tabel SPSS (false: hanya laporan performa). */
+  includeSpss: boolean;
+  onIncludeSpssChange: (include: boolean) => void;
   /** Tombol OK sedang menjalankan analisis lengkap memakai sesi yang sama. */
   locked?: boolean;
   onBusyChange: (busy: boolean) => void;
@@ -61,6 +58,13 @@ interface ExperimentTabProps {
 }
 
 type Busy = "idle" | "single" | "batch" | "compare";
+
+const WORKLOAD_HINT: Record<Workload, string> = {
+  core: "B, S.E. and −2LL with line-by-line identical JavaScript and Rust code: the clean 2×2 contrast.",
+  full:
+    "What OK runs: the complete analysis plus the production SPSS formatter in every run. The tables are built and " +
+    "checked against mode D but not written; OK writes only the performance summary (plus one SPSS report if enabled).",
+};
 
 const PRESET_SIZES = [10_000, 50_000, 100_000] as const;
 const IS_PRODUCTION_BUILD = process.env.NODE_ENV === "production";
@@ -108,6 +112,8 @@ export function ExperimentTab({
   onModeChange: setMode,
   coldWorkers,
   onColdWorkersChange: setColdWorkers,
+  includeSpss,
+  onIncludeSpssChange,
   locked = false,
   onBusyChange,
   onResultsChange,
@@ -127,28 +133,35 @@ export function ExperimentTab({
     }
   }, [data, variables, dependent, covariates]);
 
-  // --- Pengaturan ---
-  const [singleSize, setSingleSize] = useState<string>("original");
-  const [singleCustom, setSingleCustom] = useState("");
-  const [sizeChecks, setSizeChecks] = useState<Record<string, boolean>>({
+  // --- Pengaturan (diingat selama halaman belum di-reload, lihat useDialogMemory) ---
+  const [singleSize, setSingleSize] = useDialogMemory<string>("singleSize", "original");
+  const [singleCustom, setSingleCustom] = useDialogMemory("singleCustom", "");
+  const [sizeChecks, setSizeChecks] = useDialogMemory<Record<string, boolean>>("sizeChecks", {
     original: true,
     "10000": true,
     "50000": true,
     "100000": true,
   });
-  const [customSizes, setCustomSizes] = useState("");
-  const [warmup, setWarmup] = useState("5");
-  const [repetitions, setRepetitions] = useState("30");
-  const [seed, setSeed] = useState("42");
-  const [chartMetric, setChartMetric] = useState<ChartMetric>("e2eMs");
+  const [customSizes, setCustomSizes] = useDialogMemory("customSizes", "");
+  const [warmup, setWarmup] = useDialogMemory("warmup", "5");
+  const [repetitions, setRepetitions] = useDialogMemory("repetitions", "30");
+  const [seed, setSeed] = useDialogMemory("seed", "42");
+  const [workload, setWorkload] = useDialogMemory<Workload>("workload", "core");
+  const [chartMetrics, setChartMetrics] = useDialogMemory<Record<Workload, ChartMetric>>("chartMetric", {
+    core: "e2eMs",
+    full: "totalMs",
+  });
 
   // --- Status & hasil ---
   const [busy, setBusy] = useState<Busy>("idle");
   const [progress, setProgress] = useState<BatchProgress | null>(null);
   const [timing, setTiming] = useState<{ elapsedMs: number; remainingMs: number | null } | null>(null);
-  const [single, setSingle] = useState<SingleRunResult | null>(null);
-  const [batch, setBatch] = useState<BatchResult | null>(null);
-  const [comparison, setComparison] = useState<ComparisonResult | null>(null);
+  const [single, setSingle] = useDialogMemory<SingleRunResult | null>("single", null);
+  const [batches, setBatches] = useDialogMemory<BatchResults>("batches", { core: null, full: null });
+  const [comparison, setComparison] = useDialogMemory<ComparisonResult | null>("comparison", null);
+  // Hasil batch yang ditampilkan mengikuti workload terpilih
+  const batch = batches[workload];
+  const chartMetric = chartMetrics[workload];
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -156,7 +169,7 @@ export function ExperimentTab({
   useEffect(() => () => abortRef.current?.abort(), []);
 
   useEffect(() => onBusyChange(busy !== "idle"), [busy, onBusyChange]);
-  useEffect(() => onResultsChange({ single, batch, comparison }), [single, batch, comparison, onResultsChange]);
+  useEffect(() => onResultsChange({ single, batches, comparison }), [single, batches, comparison, onResultsChange]);
 
   const session = () => {
     if (!sessionProp) throw new Error("Experiment session is not ready.");
@@ -229,6 +242,7 @@ export function ExperimentTab({
     try {
       if (batchSizesPreview.error) throw new Error(batchSizesPreview.error);
       settings = {
+        workload,
         sizes: batchSizesPreview.sizes,
         warmup: parseInteger(warmup, "Warm-up", 0),
         repetitions: parseInteger(repetitions, "Repetitions", 1),
@@ -264,7 +278,8 @@ export function ExperimentTab({
       );
       const summaries = computeSummaries(outcome.records);
       const accuracy = computeAccuracy(outcome.records);
-      setBatch({ outcome, summaries, accuracy, featureNames: prep.featureNames });
+      const result = { outcome, summaries, accuracy, featureNames: prep.featureNames };
+      setBatches((prev) => ({ ...prev, [settings.workload]: result }));
       if (outcome.meta.status === "error") toast.error(`Batch failed: ${outcome.errorMessage}`);
       else if (outcome.meta.status === "cancelled") toast.info(`Batch cancelled after ${outcome.records.length} recorded runs.`);
       else toast.success(`Batch finished: ${outcome.records.length} runs recorded.`);
@@ -355,11 +370,23 @@ export function ExperimentTab({
           <span className="text-muted-foreground">{prepared.message}</span>
         )}
       </div>
-      <p className="text-xs text-muted-foreground">
-        OK runs the full Binary Logistic analysis (method Enter, default options) with the configuration selected below
-        and writes the SPSS-format tables plus a performance report to the output viewer. A/B use the JavaScript port of
-        the production analysis, C/D the production Rust code compiled to WebAssembly.
-      </p>
+      <div className="space-y-2">
+        <p className="text-xs text-muted-foreground">
+          OK runs the full Binary Logistic analysis (method Enter, default options) once with the configuration selected
+          below and writes it to the output viewer together with a performance report. The dialog stays open, so you can
+          press OK again with another configuration. A/B use the JavaScript port of the production analysis, C/D the
+          production Rust code compiled to WebAssembly.
+        </p>
+        <label className="flex items-center gap-2 text-sm">
+          <Checkbox
+            checked={includeSpss}
+            onCheckedChange={(c) => onIncludeSpssChange(c === true)}
+            disabled={isBusy}
+            data-testid="bl-exp-include-spss"
+          />
+          Include the SPSS tables when pressing OK (unchecked: performance report only)
+        </label>
+      </div>
 
       <ResponsivenessIndicator active={active} />
 
@@ -467,6 +494,34 @@ export function ExperimentTab({
         <h3 className={sectionTitle}>
           <FlaskConical className="h-4 w-4 text-primary" aria-hidden /> Batch benchmark (all 4 modes)
         </h3>
+        <div className="space-y-1.5">
+          <div className="text-xs font-medium">Workload</div>
+          <RadioGroup
+            value={workload}
+            onValueChange={(v) => setWorkload(v as Workload)}
+            className="grid grid-cols-1 gap-2"
+            disabled={isBusy}
+            aria-label="Batch workload"
+          >
+            {(["core", "full"] as const).map((w) => (
+              <Label
+                key={w}
+                htmlFor={`bl-exp-workload-${w}`}
+                className={cn(
+                  "flex cursor-pointer items-start gap-2 rounded-md border px-3 py-2 text-sm font-normal",
+                  workload === w ? "border-primary bg-primary/5" : "border-border"
+                )}
+              >
+                <RadioGroupItem value={w} id={`bl-exp-workload-${w}`} data-testid={`bl-exp-workload-${w}`} className="mt-0.5" />
+                <span>
+                  <span className="font-medium">{WORKLOAD_LABEL[w]}</span>
+                  {batches[w] && <span className="text-xs text-muted-foreground"> · last batch kept</span>}
+                  <span className="block text-xs text-muted-foreground">{WORKLOAD_HINT[w]}</span>
+                </span>
+              </Label>
+            ))}
+          </RadioGroup>
+        </div>
         <div className="space-y-2">
           <div className="text-xs font-medium">Data sizes N</div>
           <div className="flex flex-wrap items-center gap-4">
@@ -574,9 +629,15 @@ export function ExperimentTab({
         )}
 
         {batch && (
-          <div className="space-y-4" data-testid="bl-exp-batch-result" data-status={batch.outcome.meta.status}>
+          <div
+            className="space-y-4"
+            data-testid="bl-exp-batch-result"
+            data-status={batch.outcome.meta.status}
+            data-workload={batch.outcome.meta.settings.workload}
+          >
             <div className="text-xs text-muted-foreground">
-              <strong className="text-foreground">{batch.outcome.meta.batchId}</strong> · status{" "}
+              <strong className="text-foreground">{batch.outcome.meta.batchId}</strong> ·{" "}
+              {WORKLOAD_LABEL[batch.outcome.meta.settings.workload]} · status{" "}
               {batch.outcome.meta.status} · {fmtInt(batch.outcome.records.length)} recorded runs ·{" "}
               {batch.outcome.meta.settings.coldWorkers ? "cold" : "warm"} workers · seed {batch.outcome.meta.settings.seed}
               {batch.outcome.errorMessage ? ` · ${batch.outcome.errorMessage}` : ""}
@@ -601,9 +662,9 @@ export function ExperimentTab({
                     id="bl-exp-chart-metric"
                     className="h-8 rounded-md border border-input bg-background px-2 text-sm"
                     value={chartMetric}
-                    onChange={(e) => setChartMetric(e.target.value as ChartMetric)}
+                    onChange={(e) => setChartMetrics((m) => ({ ...m, [workload]: e.target.value as ChartMetric }))}
                   >
-                    {(Object.keys(CHART_METRIC_LABEL) as ChartMetric[]).map((k) => (
+                    {CHART_METRICS[workload].map((k) => (
                       <option key={k} value={k}>
                         {CHART_METRIC_LABEL[k]}
                       </option>
@@ -623,8 +684,8 @@ export function ExperimentTab({
                   {worst.map((w) => (
                     <PassBadge
                       key={w.N}
-                      passed={w.beta < MODE_AGREEMENT_TOL && w.se < MODE_AGREEMENT_TOL}
-                      label={`N ${fmtInt(w.N)}: max ${fmtDiff(Math.max(w.beta, w.se))}`}
+                      passed={w.passed}
+                      label={`N ${fmtInt(w.N)}: max ${fmtDiff(Math.max(w.beta, w.se))}${workload === "full" ? (w.passed ? ", tables identical" : ", check tables") : ""}`}
                     />
                   ))}
                 </div>

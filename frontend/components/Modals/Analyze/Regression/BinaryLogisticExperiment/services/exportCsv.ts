@@ -4,7 +4,7 @@
  * Format mesin: pemisah koma, desimal titik, angka presisi penuh.
  */
 import type { AccuracyRow, BatchMeta, ModeSummary, RunRecord } from "../types/experiment";
-import { MODES } from "../types/experiment";
+import { MODES, REFERENCE_MODE } from "../types/experiment";
 
 type Cell = string | number | boolean | null | undefined;
 
@@ -17,8 +17,14 @@ export function csvEscape(value: Cell): string {
 
 export function buildRunsCsv(records: RunRecord[], meta: BatchMeta, featureNames: string[]): string {
   const env = meta.environment;
+  // Workload "full": acuan tabel SPSS = run sukses pertama mode D pada N yang sama
+  const refHash = new Map<number, string>();
+  for (const r of records) {
+    if (r.mode === REFERENCE_MODE && r.tablesHash !== null && r.error === null && !refHash.has(r.N)) refHash.set(r.N, r.tablesHash);
+  }
   const runCols: [string, (r: RunRecord) => Cell][] = [
     ["batchId", (r) => r.batchId],
+    ["workload", (r) => r.workload],
     ["runIndex", (r) => r.runIndex],
     ["timestamp", (r) => r.timestamp],
     ["N", (r) => r.N],
@@ -33,8 +39,11 @@ export function buildRunsCsv(records: RunRecord[], meta: BatchMeta, featureNames
     ["e2eMs", (r) => r.e2eMs],
     ["overheadMs", (r) => r.overheadMs],
     ["wasmCoreMs", (r) => r.result?.wasmCoreMs ?? null],
+    ["formatMs", (r) => r.formatMs],
+    ["totalMs", (r) => r.totalMs],
     ["spawnMs", (r) => r.spawnMs],
     ["initMs", (r) => r.initMs],
+    ["engineInitMs", (r) => r.engineInitMs],
     ["maxFrameGapMs", (r) => r.maxFrameGapMs],
     ["droppedFrames", (r) => r.droppedFrames],
     ["frameCount", (r) => r.frameCount],
@@ -47,6 +56,8 @@ export function buildRunsCsv(records: RunRecord[], meta: BatchMeta, featureNames
     ["converged", (r) => r.result?.converged ?? null],
     ["stepHalvings", (r) => r.result?.stepHalvings ?? null],
     ["neg2ll", (r) => r.result?.neg2ll ?? null],
+    ["tablesHash", (r) => r.tablesHash],
+    ["tablesIdenticalToD", (r) => (r.tablesHash === null ? null : r.tablesHash === refHash.get(r.N))],
   ];
   const coefCols: [string, (r: RunRecord) => Cell][] = [
     ...featureNames.map((name, j): [string, (r: RunRecord) => Cell] => [`B_${name}`, (r) => r.result?.beta[j] ?? null]),
@@ -64,12 +75,15 @@ export function buildRunsCsv(records: RunRecord[], meta: BatchMeta, featureNames
     ["covariates", meta.dataset.covariates.join(";")],
     ["nOriginal", meta.dataset.nOriginal],
     ["mainJsImportMs", meta.mainThreadInit.jsImportMs],
+    ["mainEnterImportMs", meta.mainThreadInit.enterImportMs],
     ["mainWasmImportMs", meta.mainThreadInit.wasmImportMs],
     ["mainWasmInitMs", meta.mainThreadInit.wasmInitMs],
     ["warmSpawnMsB", meta.warmWorkerInit.B?.spawnMs ?? null],
     ["warmInitMsB", meta.warmWorkerInit.B?.initMs ?? null],
     ["warmSpawnMsD", meta.warmWorkerInit.D?.spawnMs ?? null],
     ["warmInitMsD", meta.warmWorkerInit.D?.initMs ?? null],
+    ["warmEngineInitMsB", meta.warmWorkerInit.B?.engineInitMs ?? null],
+    ["warmEngineInitMsD", meta.warmWorkerInit.D?.engineInitMs ?? null],
     ["userAgent", env.userAgent],
     ["hardwareConcurrency", env.hardwareConcurrency],
     ["deviceMemory", env.deviceMemory],

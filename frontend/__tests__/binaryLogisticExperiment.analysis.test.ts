@@ -5,7 +5,14 @@
  */
 import type { BatchMeta, ExperimentMode, RunRecord } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/types/experiment";
 import { computeFrameStats, quantile, summarize } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/metrics";
-import { computeAccuracy, computeSummaries, maxAbsDiff } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/analysis";
+import {
+  accuracyPassed,
+  computeAccuracy,
+  computeSummaries,
+  maxAbsDiff,
+  maxScaledDiff,
+  worstAccuracyByN,
+} from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/analysis";
 import { buildRunsCsv, csvEscape } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/exportCsv";
 import { compareWithProduction } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/productionCompare";
 import { totalBatchRuns, validateSettings } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/runner";
@@ -16,6 +23,7 @@ jest.mock("@/stores/useVariableStore", () => ({ useVariableStore: { getState: ()
 function rec(mode: ExperimentMode, N: number, e2eMs: number, beta: number[], extra: Partial<RunRecord> = {}): RunRecord {
   return {
     batchId: "b",
+    workload: "core",
     runIndex: 1,
     phase: "measure",
     N,
@@ -29,6 +37,10 @@ function rec(mode: ExperimentMode, N: number, e2eMs: number, beta: number[], ext
     overheadMs: 0,
     spawnMs: null,
     initMs: null,
+    engineInitMs: null,
+    formatMs: null,
+    totalMs: null,
+    tablesHash: null,
     maxFrameGapMs: 16.7,
     droppedFrames: 0,
     frameCount: 3,
@@ -118,6 +130,53 @@ describe("computeSummaries & computeAccuracy", () => {
     expect(maxAbsDiff([1], [1, 2])).toBe(Infinity);
     expect(maxAbsDiff([1, NaN], [1, 2])).toBeNaN();
   });
+
+  test("workload core: formatMs/totalMs kosong, tanpa uji tabel", () => {
+    expect(computeSummaries(records)[0].totalMs).toBeNull();
+    expect(computeAccuracy(records)[0].tablesIdentical).toBeNull();
+  });
+});
+
+describe("workload full (analisis lengkap + tabel SPSS)", () => {
+  const full = (mode: ExperimentMode, beta: number[], hash: string, totalMs: number, extra: Partial<RunRecord> = {}) =>
+    rec(mode, 300, totalMs - 2, beta, { workload: "full", formatMs: 2, totalMs, tablesHash: hash, engineInitMs: 0, ...extra });
+  const records = [
+    full("D", [0.5, 1.2e6], "h1", 20),
+    full("D", [0.5, 1.2e6], "h1", 22),
+    full("A", [0.5, 1.2e6 + 1e-3], "h1", 30), // selisih absolut 1e-3, berskala ≈ 8e-10
+    full("B", [0.5, 1.2e6], "h2", 25), // tabel SPSS berbeda
+    full("C", [0.5, 1.2e6], "h1", 10, { error: "boom", result: null, tablesHash: null }),
+  ];
+
+  test("ringkasan formatMs dan totalMs per mode", () => {
+    const s = computeSummaries(records);
+    const d = s.find((x) => x.mode === "D")!;
+    expect(d.totalMs!.median).toBe(21);
+    expect(d.formatMs!.median).toBe(2);
+    expect(s.find((x) => x.mode === "C")!.totalMs).toBeNull(); // hanya run gagal
+  });
+
+  test("tabel identik dihitung terhadap run pertama mode D; lulus memakai selisih berskala", () => {
+    const acc = computeAccuracy(records);
+    const at = (m: ExperimentMode) => acc.find((r) => r.mode === m)!;
+    expect(at("D").tablesIdentical).toEqual({ identical: 2, total: 2 });
+    expect(at("A").tablesIdentical).toEqual({ identical: 1, total: 1 });
+    expect(at("B").tablesIdentical).toEqual({ identical: 0, total: 1 });
+    // rec() memakai S.E. = |B| / 10, jadi S.E. A ikut bergeser 1e-4
+    expect(at("A").maxAbsDiffSe).toBeCloseTo(1e-4, 9);
+    expect(at("A").maxAbsDiffBeta).toBeGreaterThan(1e-8);
+    expect(at("A").maxScaledDiff).toBeLessThan(1e-8);
+    expect(accuracyPassed(at("A"))).toBe(true);
+    expect(accuracyPassed(at("B"))).toBe(false);
+    expect(acc.some((r) => r.mode === "C")).toBe(false);
+    expect(worstAccuracyByN(acc)).toEqual([{ N: 300, beta: at("A").maxAbsDiffBeta, se: at("A").maxAbsDiffSe, passed: false }]);
+  });
+
+  test("maxScaledDiff: relatif untuk nilai besar, absolut untuk nilai kecil", () => {
+    expect(maxScaledDiff([1e6], [1e6 + 1])).toBeCloseTo(1 / (1e6 + 1), 15);
+    expect(maxScaledDiff([0.001], [0.002])).toBeCloseTo(0.001, 12);
+    expect(maxScaledDiff([1], [1, 2])).toBe(Infinity);
+  });
 });
 
 describe("CSV", () => {
@@ -160,6 +219,32 @@ describe("CSV", () => {
     expect(row).toContain('"UA, test"');
     expect(row).toContain("abc123");
     expect(lines[2].split(",")[header.indexOf("error")]).toBe("x");
+    expect(lines[1].split(",")[header.indexOf("workload")]).toBe("core");
+    expect(lines[1].split(",")[header.indexOf("totalMs")]).toBe("");
+  });
+
+  test("workload full: formatMs, totalMs, dan kesamaan tabel SPSS terhadap run D pertama per N", () => {
+    const meta = {
+      batchId: "batch-full-1",
+      startedAt: "x",
+      settings: { workload: "full", sizes: [100], warmup: 0, repetitions: 1, seed: 1, coldWorkers: false, maxIter: 20, tol: 0.001 },
+      environment: { userAgent: "UA" },
+      mainThreadInit: { jsImportMs: null, enterImportMs: 4, wasmImportMs: 2, wasmInitMs: 3 },
+      warmWorkerInit: { B: { spawnMs: 4, initMs: 0, engineInitMs: 1.5 } },
+      dataset: { dependent: "y", covariates: ["x"], nOriginal: 100, nTotalRows: 100, nMissing: 0, p: 2, cols: 1 },
+    } as unknown as BatchMeta;
+    const full = (mode: ExperimentMode, hash: string) =>
+      rec(mode, 100, 10, [0.5, 1.2], { workload: "full", formatMs: 1.5, totalMs: 12, tablesHash: hash });
+    const csv = buildRunsCsv([full("A", "h2"), full("D", "h1"), full("B", "h1")], meta, ["Constant", "x"]);
+    const lines = csv.trim().split("\r\n");
+    const header = lines[0].split(",");
+    const col = (i: number, name: string) => lines[i].split(",")[header.indexOf(name)];
+    expect(col(1, "workload")).toBe("full");
+    expect(col(1, "formatMs")).toBe("1.5");
+    expect(col(1, "totalMs")).toBe("12");
+    expect([col(1, "tablesIdenticalToD"), col(2, "tablesIdenticalToD"), col(3, "tablesIdenticalToD")]).toEqual(["false", "true", "true"]);
+    expect(col(1, "mainEnterImportMs")).toBe("4");
+    expect(col(1, "warmEngineInitMsB")).toBe("1.5");
   });
 });
 
@@ -212,7 +297,7 @@ describe("compareWithProduction", () => {
 });
 
 describe("validasi pengaturan batch", () => {
-  const base = { sizes: [100, 1000], warmup: 5, repetitions: 30, seed: 1, coldWorkers: false, maxIter: 20, tol: 0.001 };
+  const base = { workload: "core" as const, sizes: [100, 1000], warmup: 5, repetitions: 30, seed: 1, coldWorkers: false, maxIter: 20, tol: 0.001 };
   test("jumlah run total = |N| × (warm-up + ulangan) × 4", () => {
     expect(totalBatchRuns(base)).toBe(2 * 35 * 4);
   });

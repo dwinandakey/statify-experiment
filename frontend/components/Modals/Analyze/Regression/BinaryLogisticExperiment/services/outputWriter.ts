@@ -2,34 +2,31 @@
  * Tombol OK: jalankan analisis Binary Logistic lengkap (metode Enter, semua
  * opsi default) pada konfigurasi A/B/C/D yang dipilih, lalu tulis ke output viewer.
  *
- * 1. Laporan statistik berkonvensi SPSS: objek hasil mesin terpilih (A/B: port
- *    JS logistic_enter.js, C/D: calculate_binary_logistic Rust-Wasm) diberi
- *    model_info seperti worker produksi, lalu diformat dengan formatter
- *    produksi `formatBinaryLogisticResult`, sintaks dari
+ * 1. Laporan statistik berkonvensi SPSS (bisa dimatikan): tabel yang sudah
+ *    diformat ExperimentSession.runFull dengan formatter produksi
+ *    `formatBinaryLogisticResult` (lihat spssFormat.ts), sintaks dari
  *    `generateLogisticRegressionSyntax`, dan pengelompokan komponen yang sama
  *    dengan handleAnalyze di BinaryLogisticMain.tsx. Catatan kartu menyebut
  *    konfigurasi yang menghitungnya.
  * 2. Kartu "Binary Logistic (Experiment)" di bawah log yang sama: performa
- *    run OK tersebut (compute, e2e, frame, long task, format, simpan), lalu
- *    ringkasan Run once, batch, akurasi antar mode, dan perbandingan produksi.
- *    Data mentah per run tetap lewat Download CSV.
+ *    run OK tersebut, lalu ringkasan Run once, batch inti IRLS, batch analisis
+ *    lengkap, dan perbandingan produksi. Tabel SPSS dari run batch tidak
+ *    ditulis (hanya divalidasi lewat hash); data mentah per run lewat Download CSV.
  */
 import { useResultStore } from "@/stores/useResultStore";
-import { formatBinaryLogisticResult } from "@/components/Modals/Analyze/Regression/BinaryLogistic/services/formatter";
 import { generateLogisticRegressionSyntax } from "@/components/Modals/Analyze/Regression/BinaryLogistic/services/syntaxGenerator";
 import {
   DEFAULT_BINARY_LOGISTIC_OPTIONS_PARAMS as DEFAULT_OPTIONS,
   DEFAULT_BINARY_LOGISTIC_SAVE_PARAMS,
   type AnalysisSection,
   type BinaryLogisticCategoricalParams,
-  type LogisticResult,
 } from "@/components/Modals/Analyze/Regression/BinaryLogistic/types/binary-logistic";
-import type { ExperimentResults, FullRunRecord, PreparedData } from "../types/experiment";
+import type { BatchResult, ExperimentResults, FullRunRecord, PreparedData, Workload } from "../types/experiment";
 import { MODES } from "../types/experiment";
 import { isCategoricalCovariate } from "./prepareData";
+import { METHOD } from "./spssFormat";
 import { fmtDiff, fmtInt, fmtMB, fmtMs, fmtNum } from "./format";
 
-const METHOD = "Enter" as const;
 export const EXPERIMENT_ANALYTIC_TITLE = "Binary Logistic (Experiment): 2×2 performance";
 
 /** Pengelompokan komponen per section, disalin dari handleAnalyze BinaryLogisticMain.tsx. */
@@ -54,25 +51,6 @@ function rendererPayload(section: AnalysisSection) {
     return { charts: section.chartData.charts, description: section.description, title: section.title };
   }
   return { tables: [{ ...section.data, title: section.title }] };
-}
-
-/**
- * Lengkapi hasil mentah mesin seperti worker produksi sebelum diformat:
- * cek classification_table, method_used, dan model_info (encoding Y/X,
- * jumlah kasus, nama variabel).
- */
-export function toProductionPayload(raw: unknown, prepared: PreparedData): LogisticResult {
-  const result = raw as (LogisticResult & { step_history?: { step: number }[] }) | null;
-  if (!result || !result.classification_table) throw new Error("Calculation failed in backend.");
-  const history = result.step_history;
-  return {
-    ...result,
-    method_used: METHOD,
-    model_info: {
-      ...prepared.full.modelInfo,
-      step_number: history && history.length > 0 ? history[history.length - 1].step : 0,
-    },
-  } as LogisticResult;
 }
 
 /** Parameter kategorik setara state dialog produksi setelah deteksi otomatis nominal/ordinal. */
@@ -107,6 +85,75 @@ interface ExperimentSection {
   description: string;
   component: string;
   spec: TableSpec;
+}
+
+const BATCH_TEXT: Record<Workload, { name: string; component: string }> = {
+  core: { name: "IRLS core", component: "Experiment: Batch benchmark (IRLS core)" },
+  full: { name: "full analysis + SPSS tables", component: "Experiment: Batch benchmark (full analysis)" },
+};
+
+function batchSections(workload: Workload, result: BatchResult): ExperimentSection[] {
+  const { summaries, accuracy, outcome } = result;
+  const { meta } = outcome;
+  const s = meta.settings;
+  const text = BATCH_TEXT[workload];
+  const full = workload === "full";
+  const cell = (st: (typeof summaries)[number]["e2eMs"]) => (st ? `${fmtMs(st.median)} [${fmtMs(st.q1)}–${fmtMs(st.q3)}]` : "–");
+
+  const summaryColumns: [string, string][] = [["N", "n"], ["Mode", "mode"], ["Runs", "runs"], ["computeMs", "compute"], ["e2eMs", "e2e"]];
+  if (full) summaryColumns.push(["formatMs", "format"], ["totalMs", "total"]);
+  summaryColumns.push(["maxFrameGapMs", "gap"]);
+
+  const accuracyColumns: [string, string][] = [["N", "n"], ["Mode", "mode"], ["max |ΔB|", "db"], ["max |ΔS.E.|", "dse"], ["Iterations", "it"]];
+  if (full) accuracyColumns.push(["SPSS tables identical to D", "tables"]);
+
+  return [
+    {
+      title: `Batch benchmark (${text.name}) – summary`,
+      description:
+        `Batch ${meta.batchId} (${meta.status}): ${outcome.records.length} recorded runs of ${meta.dataset.dependent} ~ ` +
+        `${meta.dataset.covariates.join(", ")}; warm-up ${s.warmup}, repetitions ${s.repetitions}, seed ${s.seed}, ` +
+        `${s.coldWorkers ? "cold" : "warm"} workers, build ${meta.environment.buildMode}. ` +
+        (full
+          ? "Each run computed the full analysis and built the SPSS tables (not written); totalMs = dispatch → tables formatted. "
+          : "") +
+        "Values in ms: median [Q1–Q3]. Per-run data: Download CSV in the dialog.",
+      component: text.component,
+      spec: table(
+        `Batch summary – ${text.name} (ms)`,
+        summaryColumns,
+        summaries.map((sm) => ({
+          n: fmtInt(sm.N),
+          mode: MODES[sm.mode].label,
+          runs: `${sm.runs}${sm.errors ? ` (${sm.errors} errors)` : ""}`,
+          compute: cell(sm.computeMs),
+          e2e: cell(sm.e2eMs),
+          format: cell(sm.formatMs),
+          total: cell(sm.totalMs),
+          gap: cell(sm.maxFrameGapMs),
+        }))
+      ),
+    },
+    {
+      title: `Batch benchmark (${text.name}) – accuracy vs mode D`,
+      description: full
+        ? "Maximum absolute difference of B and S.E. (Variables in the Equation) against the first run of mode D at the same N, and the number of runs whose formatted SPSS tables are identical to that run."
+        : "Maximum absolute difference of B and S.E. against the first run of mode D at the same N, over all runs.",
+      component: text.component,
+      spec: table(
+        `Accuracy vs mode D – ${text.name}`,
+        accuracyColumns,
+        accuracy.map((a) => ({
+          n: fmtInt(a.N),
+          mode: MODES[a.mode].label,
+          db: fmtDiff(a.maxAbsDiffBeta),
+          dse: fmtDiff(a.maxAbsDiffSe),
+          it: fmtInt(a.iterations),
+          tables: a.tablesIdentical ? `${a.tablesIdentical.identical}/${a.tablesIdentical.total}` : "–",
+        }))
+      ),
+    },
+  ];
 }
 
 export function buildExperimentSections(results: ExperimentResults): ExperimentSection[] {
@@ -155,48 +202,9 @@ export function buildExperimentSections(results: ExperimentResults): ExperimentS
     });
   }
 
-  if (results.batch) {
-    const { summaries, accuracy, outcome } = results.batch;
-    const s = outcome.meta.settings;
-    sections.push({
-      title: "Batch benchmark – summary",
-      description:
-        `Batch ${outcome.meta.batchId} (${outcome.meta.status}): ${outcome.records.length} recorded runs, ` +
-        `warm-up ${s.warmup}, repetitions ${s.repetitions}, seed ${s.seed}, ${s.coldWorkers ? "cold" : "warm"} workers, ` +
-        `build ${outcome.meta.environment.buildMode}. Values in ms: median [Q1–Q3]. Per-run data: Download CSV in the dialog.`,
-      component: "Experiment: Batch benchmark",
-      spec: table(
-        "Batch summary (ms)",
-        [["N", "n"], ["Mode", "mode"], ["Runs", "runs"], ["computeMs", "compute"], ["e2eMs", "e2e"], ["maxFrameGapMs", "gap"]],
-        summaries.map((sm) => {
-          const cell = (st: typeof sm.e2eMs) => (st ? `${fmtMs(st.median)} [${fmtMs(st.q1)}–${fmtMs(st.q3)}]` : "–");
-          return {
-            n: fmtInt(sm.N),
-            mode: MODES[sm.mode].label,
-            runs: `${sm.runs}${sm.errors ? ` (${sm.errors} errors)` : ""}`,
-            compute: cell(sm.computeMs),
-            e2e: cell(sm.e2eMs),
-            gap: cell(sm.maxFrameGapMs),
-          };
-        })
-      ),
-    });
-    sections.push({
-      title: "Batch benchmark – accuracy vs mode D",
-      description: "Maximum absolute difference of B and S.E. against the first run of mode D at the same N, over all runs.",
-      component: "Experiment: Batch benchmark",
-      spec: table(
-        "Accuracy vs mode D",
-        [["N", "n"], ["Mode", "mode"], ["max |ΔB|", "db"], ["max |ΔS.E.|", "dse"], ["Iterations", "it"]],
-        accuracy.map((a) => ({
-          n: fmtInt(a.N),
-          mode: MODES[a.mode].label,
-          db: fmtDiff(a.maxAbsDiffBeta),
-          dse: fmtDiff(a.maxAbsDiffSe),
-          it: fmtInt(a.iterations),
-        }))
-      ),
-    });
+  for (const workload of ["core", "full"] as const) {
+    const batch = results.batches[workload];
+    if (batch) sections.push(...batchSections(workload, batch));
   }
 
   if (results.comparison && results.comparison.comparisons.length > 0) {
@@ -230,12 +238,14 @@ const ENGINE_LABEL: Record<"js" | "wasm", string> = {
 };
 
 /** Tabel performa analisis lengkap yang dijalankan tombol OK. */
-function okRunSection(run: FullRunRecord, formatMs: number, saveMs: number): ExperimentSection {
+function okRunSection(run: FullRunRecord, saveMs: number | null): ExperimentSection {
   const info = MODES[run.mode];
   const rows: [string, string, string][] = [
     ["computeMs", fmtMs(run.computeMs, 3), "full analysis, measured where it runs"],
     ["e2eMs", fmtMs(run.e2eMs, 3), "main thread: dispatch → result available"],
     ["overheadMs", fmtMs(run.overheadMs, 3), "e2eMs − computeMs"],
+    ["formatMs", fmtMs(run.formatMs, 3), "production SPSS formatter on the main thread"],
+    ["totalMs", fmtMs(run.totalMs, 3), "dispatch → SPSS tables formatted"],
     ["engineInitMs", fmtMs(run.engineInitMs, 3), "engine load before timing (0 if already loaded)"],
   ];
   if (run.workerCreated) {
@@ -251,15 +261,15 @@ function okRunSection(run: FullRunRecord, formatMs: number, saveMs: number): Exp
       "count · total",
     ],
     ["heapUsedMB", fmtMB(run.heapUsedMB), "main-thread JS heap (Chromium)"],
-    ["wasmMemoryMB", fmtMB(run.wasmMemoryMB), "wasm linear memory"],
-    ["formatMs", fmtMs(formatMs, 3), "production formatter on the main thread"],
-    ["saveMs", fmtMs(saveMs, 3), "writing the SPSS tables to the output store"]
+    ["wasmMemoryMB", fmtMB(run.wasmMemoryMB), "wasm linear memory"]
   );
+  if (saveMs !== null) rows.push(["saveMs", fmtMs(saveMs, 3), "writing the SPSS tables to the output store"]);
   return {
     title: `Analysis run (OK) – ${info.label}`,
     description:
       `Full Binary Logistic analysis (Enter, default options) computed by ${ENGINE_LABEL[info.technology]} on the ` +
-      `${info.location === "main" ? "main thread" : "Web Worker"}; N = ${fmtInt(run.rows)}, covariates = ${run.cols}` +
+      `${info.location === "main" ? "main thread" : "Web Worker"}, then formatted into SPSS tables on the main thread; ` +
+      `N = ${fmtInt(run.rows)}, covariates = ${run.cols}. One run without warm-up` +
       `${run.pageHidden ? "; the tab was hidden during the run, frame metrics are invalid" : ""}.`,
     component: "Experiment: Analysis run (OK)",
     spec: table(
@@ -270,27 +280,22 @@ function okRunSection(run: FullRunRecord, formatMs: number, saveMs: number): Exp
   };
 }
 
+export interface WriteOptions {
+  /** Tulis juga tabel SPSS (false: hanya laporan performa). */
+  includeSpss: boolean;
+}
+
 /**
- * Tulis laporan SPSS dari hasil analisis lengkap konfigurasi terpilih
- * (`okRun`, dari ExperimentSession.runFull) + kartu eksperimen.
+ * Tulis hasil run OK (`okRun`, dari ExperimentSession.runFull): log sintaks,
+ * tabel SPSS (opsional), lalu kartu eksperimen.
  */
 export async function writeExperimentOutput(
   prepared: PreparedData,
   results: ExperimentResults,
-  okRun: FullRunRecord
-): Promise<{ statisticalSections: number; experimentSections: number }> {
-  if (okRun.error || !okRun.result) throw new Error(okRun.error ?? "Analysis produced no result.");
-  const payload = toProductionPayload(okRun.result, prepared);
-
-  const tFormat = performance.now();
-  const formatted = formatBinaryLogisticResult(payload, prepared.dependent, prepared.covariates, {
-    displayAtLastStep: !DEFAULT_OPTIONS.displayAtEachStep,
-    ciForExpB: DEFAULT_OPTIONS.ciForExpB,
-    ciLevel: DEFAULT_OPTIONS.ciLevel,
-    cutoff: DEFAULT_OPTIONS.classificationCutoff,
-    casewiseOutliers: DEFAULT_OPTIONS.casewiseOutliers,
-  });
-  const formatMs = performance.now() - tFormat;
+  okRun: FullRunRecord,
+  options: WriteOptions
+): Promise<{ logId: number; statisticalSections: number; experimentSections: number }> {
+  if (okRun.error || !okRun.formatted) throw new Error(okRun.error ?? "Analysis produced no result.");
   const syntax = generateLogisticRegressionSyntax({
     dependent: prepared.dependent,
     covariates: prepared.covariates,
@@ -302,31 +307,39 @@ export async function writeExperimentOutput(
   });
 
   const { addLog, addAnalytic, addStatistic } = useResultStore.getState();
-  const tSave = performance.now();
   const logId = await addLog({ log: syntax });
-  const analyticId = await addAnalytic(logId, {
-    title: "Binary Logistic Regression",
-    note: `Method: ${METHOD} · computed with ${MODES[okRun.mode].label}`,
-  });
-  const statSections = formatted.sections ?? [];
-  for (const section of statSections) {
-    await addStatistic(analyticId, {
-      title: section.title,
-      description: section.description || "",
-      output_data: JSON.stringify(rendererPayload(section)),
-      components: productionComponentCategory(section),
+  const label = MODES[okRun.mode].label;
+
+  let statSections: AnalysisSection[] = [];
+  let saveMs: number | null = null;
+  if (options.includeSpss) {
+    const tSave = performance.now();
+    const analyticId = await addAnalytic(logId, {
+      title: "Binary Logistic Regression",
+      note: `Method: ${METHOD} · computed with ${label}`,
     });
+    statSections = okRun.formatted.sections ?? [];
+    for (const section of statSections) {
+      await addStatistic(analyticId, {
+        title: section.title,
+        description: section.description || "",
+        output_data: JSON.stringify(rendererPayload(section)),
+        components: productionComponentCategory(section),
+      });
+    }
+    saveMs = performance.now() - tSave;
   }
-  const saveMs = performance.now() - tSave;
 
   const coreSections = buildExperimentSections(results);
-  const experimentSections = [okRunSection(okRun, formatMs, saveMs), ...coreSections];
+  const experimentSections = [okRunSection(okRun, saveMs), ...coreSections];
   const expId = await addAnalytic(logId, {
     title: EXPERIMENT_ANALYTIC_TITLE,
     note:
-      `JavaScript vs Rust-Wasm × main thread vs Web Worker. The statistical tables above were computed with ` +
-      `${MODES[okRun.mode].label}` +
-      (coreSections.length > 0 ? "; Run once and batch results below use the IRLS core only." : "."),
+      "JavaScript vs Rust-Wasm × main thread vs Web Worker. " +
+      (options.includeSpss
+        ? `The statistical tables above were computed with ${label}`
+        : `Analysis computed with ${label}; SPSS tables were not written (performance report only)`) +
+      (coreSections.length > 0 ? ". Run once and batch results below were measured in the dialog." : "."),
   });
   for (const s of experimentSections) {
     await addStatistic(expId, {
@@ -336,5 +349,5 @@ export async function writeExperimentOutput(
       components: s.component,
     });
   }
-  return { statisticalSections: statSections.length, experimentSections: experimentSections.length };
+  return { logId, statisticalSections: statSections.length, experimentSections: experimentSections.length };
 }

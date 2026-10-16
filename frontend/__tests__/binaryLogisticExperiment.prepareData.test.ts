@@ -10,6 +10,7 @@ import {
   encodeDependent,
   prepareExperimentData,
   resample,
+  resampleFull,
 } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/prepareData";
 import {
   deriveSeed,
@@ -206,6 +207,40 @@ describe("resample", () => {
   test("ukuran tidak valid ditolak", () => {
     expect(() => resample(X, y, n, p, 0, 1)).toThrow(/Invalid target size/);
     expect(() => resample(X, y, n, p, 2.5, 1)).toThrow(/Invalid target size/);
+  });
+});
+
+describe("resampleFull (input analisis lengkap)", () => {
+  const data = [
+    [1, 380, 3.61, 3, "a"],
+    [0, 660, 3.67, 3, "b"],
+    [1, 800, 4.0, 1, "c"],
+    [0, 640, 3.19, 4, "d"],
+    [1, 520, 2.93, 4, "e"],
+    [0, 760, 3.0, 2, "f"],
+  ];
+  const prep = prepareExperimentData(data, vars, vars[0], [vars[1], vars[3]]);
+
+  test("baris yang sama dengan resample() design matrix untuk seed yang sama", () => {
+    const full = resampleFull(prep.full, 200, 11);
+    const design = resample(prep.X, prep.y, prep.n, prep.p, 200, 11);
+    expect(full.rows).toBe(200);
+    expect(Array.from(full.y)).toEqual(Array.from(design.y));
+    // Kolom gre (numerik) sama persis; kolom rank berisi kode asli, design berisi dummy
+    for (let i = 0; i < 200; i++) {
+      expect(full.X[i * full.cols]).toBe(design.X[i * prep.p + 1]);
+      const src = prep.full.X.findIndex((v, j) => j % prep.full.cols === 0 && v === full.X[i * full.cols]) / prep.full.cols;
+      expect(full.X[i * full.cols + 1]).toBe(prep.full.X[src * prep.full.cols + 1]);
+    }
+  });
+
+  test("model_info mengikuti N baru tanpa missing; N asli → input apa adanya", () => {
+    const full = resampleFull(prep.full, 50, 3);
+    expect(full.modelInfo.n_samples).toBe(50);
+    expect(full.modelInfo.n_missing).toBe(0);
+    expect(full.modelInfo.x_encodings).toEqual(prep.full.modelInfo.x_encodings);
+    expect(full.configJson).toBe(prep.full.configJson);
+    expect(resampleFull(prep.full, prep.n, 3)).toBe(prep.full);
   });
 });
 

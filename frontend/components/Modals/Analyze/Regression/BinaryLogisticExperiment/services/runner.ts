@@ -11,7 +11,12 @@
  *   e2eMs = computeMs dan overheadMs = 0.
  * - Urutan per run: ukur → laporkan progress (setState) → jeda 2 rAF + 50 ms
  *   (React merender di sini, di luar jendela ukur) → ambil long task.
+ * - Workload "full" (tombol OK dan batch analisis lengkap): mesin analisis
+ *   lengkap per mode, lalu formatter tabel SPSS produksi di main thread, masih
+ *   di dalam jendela ukur (formatMs, totalMs). Tabel batch hanya di-hash untuk
+ *   validasi lalu dibuang; tidak ada yang ditulis ke output viewer.
  */
+import type { BinaryLogisticOutput } from "@/components/Modals/Analyze/Regression/BinaryLogistic/types/binary-logistic";
 import type {
   BatchMeta,
   BatchOutcome,
@@ -38,8 +43,9 @@ import {
   interRunPause,
   nextTask,
 } from "./metrics";
-import { resample } from "./prepareData";
+import { resample, resampleFull } from "./prepareData";
 import { deriveSeed, mulberry32, shuffleInPlace } from "./prng";
+import { coefficientsFromResult, formatSpssTables, spssTablesHash } from "./spssFormat";
 
 // Modul di /public, dimuat browser apa adanya (tanpa webpack/SWC). Specifier
 // disimpan di konstanta: literal path absolut di import() memicu TS2307 karena
@@ -521,7 +527,18 @@ async function measureRun(mode: ExperimentMode, data: DatasetForRun, env: RunEnv
   return { mode, timestamp, spawnMs, initMs, ...m };
 }
 
-interface PendingFullRun extends Measured<unknown> {
+/** Keluaran pipeline analisis lengkap: hasil mesin + tabel SPSS terformat. */
+interface FullOutput {
+  result: unknown;
+  formatted: BinaryLogisticOutput;
+  formatMs: number;
+  /** Tabel SPSS selesai diformat (jam main thread). */
+  tDone: number;
+}
+
+type SpssFormatter = (raw: unknown) => BinaryLogisticOutput;
+
+interface PendingFullRun extends Measured<FullOutput> {
   mode: ExperimentMode;
   timestamp: string;
   spawnMs: number | null;
@@ -530,13 +547,25 @@ interface PendingFullRun extends Measured<unknown> {
   engineInitMs: number | null;
 }
 
+/** Formatter tabel SPSS produksi untuk input analisis lengkap tertentu (model_info per N). */
+function spssFormatter(prepared: PreparedData, input: FullAnalysisInput): SpssFormatter {
+  return (raw) => formatSpssTables(raw, input.modelInfo, prepared.dependent, prepared.covariates);
+}
+
 /**
- * Satu analisis Binary Logistic lengkap (tombol OK). A/B: port JS
- * logistic_enter.js; C/D: calculate_binary_logistic Rust dari paket wasm
- * eksperimen (+ JSON.parse hasil, di dalam computeMs). Input dan aturan
- * pengukuran sama dengan run inti: mesin dimuat dan buffer disalin sebelum timer.
+ * Satu analisis Binary Logistic lengkap (tombol OK, batch workload "full").
+ * A/B: port JS logistic_enter.js; C/D: calculate_binary_logistic Rust dari
+ * paket wasm eksperimen (+ JSON.parse hasil, di dalam computeMs). Setelah
+ * hasil tersedia di main thread, tabel SPSS diformat dengan formatter produksi
+ * (seperti handleAnalyze produksi), masih di dalam jendela ukur. Aturan lain
+ * sama dengan run inti: mesin dimuat dan buffer disalin sebelum timer.
  */
-async function measureFullRun(mode: ExperimentMode, input: FullAnalysisInput, env: RunEnv): Promise<PendingFullRun> {
+async function measureFullRun(
+  mode: ExperimentMode,
+  input: FullAnalysisInput,
+  format: SpssFormatter,
+  env: RunEnv
+): Promise<PendingFullRun> {
   const timestamp = new Date().toISOString();
   let spawnMs: number | null = null;
   let initMs: number | null = null;
@@ -581,19 +610,27 @@ async function measureFullRun(mode: ExperimentMode, input: FullAnalysisInput, en
   const y = input.y.slice();
   const { rows, cols, configJson, featureNamesJson } = input;
 
-  const m = await measureWindow<unknown>(mode, env, spawned, async () => {
-    if (mode === "A") return timedCall(() => enter!.calculateBinaryLogistic(X, rows, cols, y, configJson, featureNamesJson));
-    if (mode === "C") {
-      return timedCall(
+  const m = await measureWindow<FullOutput>(mode, env, spawned, async () => {
+    let timed: Timed<unknown>;
+    if (mode === "A") {
+      timed = timedCall(() => enter!.calculateBinaryLogistic(X, rows, cols, y, configJson, featureNamesJson));
+    } else if (mode === "C") {
+      timed = timedCall(
         () => JSON.parse(wasmMain!.pkg.calculate_binary_logistic(X, rows, cols, y, configJson, featureNamesJson)) as unknown,
         () => wasmMain!.exports.memory.buffer.byteLength
       );
+    } else {
+      timed = await runOnWorker<unknown>(
+        spawned!.worker,
+        { type: "run_full", X, y, rows, cols, configJson, featureNamesJson },
+        env.signal
+      );
     }
-    return runOnWorker<unknown>(
-      spawned!.worker,
-      { type: "run_full", X, y, rows, cols, configJson, featureNamesJson },
-      env.signal
-    );
+    // Tabel SPSS di main thread untuk keempat mode, seperti dialog produksi
+    const f0 = performance.now();
+    const formatted = format(timed.raw);
+    const tDone = performance.now();
+    return { ...timed, raw: { result: timed.raw, formatted, formatMs: tDone - f0, tDone } };
   });
 
   return { mode, timestamp, spawnMs, initMs, workerCreated, engineInitMs, ...m };
@@ -628,6 +665,7 @@ function finalizeRun(pending: PendingRun, ctx: RecordContext, longTasks: LongTas
   const isWorker = MODES[pending.mode].location === "worker";
   return {
     batchId: ctx.batchId,
+    workload: "core",
     runIndex: ctx.runIndex,
     phase: ctx.phase,
     N: ctx.N,
@@ -641,6 +679,10 @@ function finalizeRun(pending: PendingRun, ctx: RecordContext, longTasks: LongTas
     overheadMs: e2eMs - pending.computeMs,
     spawnMs: pending.spawnMs,
     initMs: pending.initMs,
+    engineInitMs: null,
+    formatMs: null,
+    totalMs: null,
+    tablesHash: null,
     maxFrameGapMs: pending.frames.maxFrameGapMs,
     droppedFrames: pending.frames.droppedFrames,
     frameCount: pending.frames.frameCount,
@@ -650,6 +692,51 @@ function finalizeRun(pending: PendingRun, ctx: RecordContext, longTasks: LongTas
     wasmMemoryMB: bytesToMB(pending.wasmMemoryBytes),
     pageHidden: pending.pageHidden,
     result: pending.raw && !pending.error ? normalizeResult(pending.raw, pending.mode) : null,
+    error: pending.error,
+    timestamp: pending.timestamp,
+  };
+}
+
+/** Rekaman batch workload "full": B/S.E. dari tabel Variables in the Equation, tabel SPSS sebagai hash. */
+function finalizeFullRun(
+  pending: PendingFullRun,
+  ctx: RecordContext,
+  longTasks: LongTaskCollector,
+  featureNames: string[],
+  tablesHash: string | null
+): RunRecord {
+  const lt = longTasks.collect(pending.t0, pending.windowEnd);
+  const e2eMs = pending.t1 - pending.t0;
+  const out = pending.error ? null : pending.raw;
+  return {
+    batchId: ctx.batchId,
+    workload: "full",
+    runIndex: ctx.runIndex,
+    phase: ctx.phase,
+    N: ctx.N,
+    p: ctx.p,
+    rep: ctx.rep,
+    orderInRep: ctx.orderInRep,
+    mode: pending.mode,
+    workerStart: MODES[pending.mode].location === "worker" ? (ctx.coldWorkers ? "cold" : "warm") : null,
+    computeMs: pending.computeMs,
+    e2eMs,
+    overheadMs: e2eMs - pending.computeMs,
+    spawnMs: pending.spawnMs,
+    initMs: pending.initMs,
+    engineInitMs: pending.engineInitMs,
+    formatMs: out ? out.formatMs : null,
+    totalMs: out ? out.tDone - pending.t0 : null,
+    tablesHash: out ? tablesHash : null,
+    maxFrameGapMs: pending.frames.maxFrameGapMs,
+    droppedFrames: pending.frames.droppedFrames,
+    frameCount: pending.frames.frameCount,
+    longTaskCount: lt ? lt.count : null,
+    longTaskTotalMs: lt ? lt.totalMs : null,
+    heapUsedMB: pending.heapUsedMB,
+    wasmMemoryMB: bytesToMB(pending.wasmMemoryBytes),
+    pageHidden: pending.pageHidden,
+    result: out ? coefficientsFromResult(out.result, featureNames) : null,
     error: pending.error,
     timestamp: pending.timestamp,
   };
@@ -679,9 +766,9 @@ export class ExperimentSession {
     return { ...this.pool.initInfo };
   }
 
-  /** Muat modul main thread inti lebih awal; timing tetap tercatat sekali per page load. */
-  async preload(): Promise<void> {
-    await Promise.all([loadJsCore(), loadWasmMain()]);
+  /** Muat modul main thread lebih awal; timing tetap tercatat sekali per page load. */
+  async preload(workload: BatchSettings["workload"] = "core"): Promise<void> {
+    await Promise.all([workload === "full" ? loadEnterJs() : loadJsCore(), loadWasmMain()]);
   }
 
   get isBusy(): boolean {
@@ -719,10 +806,10 @@ export class ExperimentSession {
     }
   }
 
-  /** Analisis Binary Logistic lengkap pada satu konfigurasi (tombol OK). */
+  /** Analisis Binary Logistic lengkap + tabel SPSS pada satu konfigurasi (tombol OK). */
   async runFull(
     mode: ExperimentMode,
-    input: FullAnalysisInput,
+    prepared: PreparedData,
     opts: { coldWorkers: boolean }
   ): Promise<FullRunRecord> {
     this.assertIdle();
@@ -730,10 +817,12 @@ export class ExperimentSession {
     try {
       this.longTasks.start();
       const env = this.env(opts.coldWorkers, DEFAULT_MAX_ITER, DEFAULT_TOL);
-      const pending = await measureFullRun(mode, input, env);
+      const input = prepared.full;
+      const pending = await measureFullRun(mode, input, spssFormatter(prepared, input), env);
       await interRunPause();
       const lt = this.longTasks.collect(pending.t0, pending.windowEnd);
       const e2eMs = pending.t1 - pending.t0;
+      const out = pending.error ? null : pending.raw;
       return {
         mode,
         timestamp: pending.timestamp,
@@ -755,7 +844,10 @@ export class ExperimentSession {
         heapUsedMB: pending.heapUsedMB,
         wasmMemoryMB: bytesToMB(pending.wasmMemoryBytes),
         pageHidden: pending.pageHidden,
-        result: pending.error ? null : pending.raw,
+        formatMs: out ? out.formatMs : null,
+        totalMs: out ? out.tDone - pending.t0 : null,
+        result: out ? out.result : null,
+        formatted: out ? out.formatted : null,
         error: pending.error,
       };
     } finally {
@@ -773,7 +865,9 @@ export class ExperimentSession {
     validateSettings(settings);
     this.busy = true;
 
-    const batchId = `batch-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}`;
+    const full = settings.workload === "full";
+    const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+    const batchId = full ? `batch-full-${stamp}` : `batch-${stamp}`;
     const total = totalBatchRuns(settings);
     const records: RunRecord[] = [];
     const report = (phase: BatchProgress["phase"], N: number | null, completed: number, message: string) =>
@@ -798,20 +892,26 @@ export class ExperimentSession {
         nTotalRows: prepared.nTotal,
         nMissing: prepared.nMissing,
         p: prepared.p,
+        cols: prepared.full.cols,
       },
       orders: [],
     };
 
     try {
       // Modul main thread (cold sekali per page load) dan worker warm (sekali per batch)
-      await this.preload();
+      await this.preload(settings.workload);
       meta.mainThreadInit = getMainThreadInit();
       this.pool.dispose();
       this.pool = new WorkerPool();
       if (!settings.coldWorkers) {
-        await this.pool.get("B");
-        await this.pool.get("D");
+        const workerB = await this.pool.get("B");
+        const workerD = await this.pool.get("D");
         meta.warmWorkerInit = { ...this.pool.initInfo };
+        if (full) {
+          // Mesin analisis lengkap dimuat sekali di worker warm, sebelum pengukuran
+          meta.warmWorkerInit.B = { ...meta.warmWorkerInit.B!, engineInitMs: await initFullOnWorker(workerB.worker) };
+          meta.warmWorkerInit.D = { ...meta.warmWorkerInit.D!, engineInitMs: await initFullOnWorker(workerD.worker) };
+        }
       }
       this.longTasks.start();
       const env = this.env(settings.coldWorkers, settings.maxIter, settings.tol, signal);
@@ -821,7 +921,9 @@ export class ExperimentSession {
       for (const N of settings.sizes) {
         if (signal.aborted) throw new AbortRunError();
         report("preparing", N, completed, `Preparing dataset N = ${N.toLocaleString()}…`);
-        const data = resample(prepared.X, prepared.y, prepared.n, prepared.p, N, settings.seed);
+        const data = full ? null : resample(prepared.X, prepared.y, prepared.n, prepared.p, N, settings.seed);
+        const fullInput = full ? resampleFull(prepared.full, N, settings.seed) : null;
+        const format = fullInput ? spssFormatter(prepared, fullInput) : null;
         // Stream acak urutan mode per N, terpisah dari stream resampling
         const orderRng = mulberry32(deriveSeed(settings.seed, N));
 
@@ -833,27 +935,36 @@ export class ExperimentSession {
           for (let k = 0; k < order.length; k++) {
             if (signal.aborted) throw new AbortRunError();
             const mode = order[k];
-            const pending = await measureRun(mode, data, env);
-            completed++;
             const label = isWarmup
               ? `Warm-up ${rep + settings.warmup}/${settings.warmup}`
               : `Rep ${rep}/${settings.repetitions}`;
-            report(isWarmup ? "warmup" : "measure", N, completed, `N = ${N.toLocaleString()} · ${label} · ${MODES[mode].short}`);
-            await interRunPause();
-            const rec = finalizeRun(
-              pending,
-              {
-                batchId,
-                runIndex: isWarmup ? 0 : ++runIndex,
-                phase: "measure",
-                N,
-                p: data.p,
-                rep,
-                orderInRep: k + 1,
-                coldWorkers: settings.coldWorkers,
-              },
-              this.longTasks
-            );
+            const progressText = `N = ${N.toLocaleString()} · ${label} · ${MODES[mode].short}`;
+            const ctx = (): RecordContext => ({
+              batchId,
+              runIndex: isWarmup ? 0 : ++runIndex,
+              phase: "measure",
+              N,
+              p: prepared.p,
+              rep,
+              orderInRep: k + 1,
+              coldWorkers: settings.coldWorkers,
+            });
+            let rec: RunRecord;
+            if (fullInput && format) {
+              const pending = await measureFullRun(mode, fullInput, format, env);
+              // Tabel SPSS hanya di-hash (di luar jendela ukur) lalu dibuang
+              const tablesHash = pending.raw && !pending.error ? spssTablesHash(pending.raw.formatted) : null;
+              completed++;
+              report(isWarmup ? "warmup" : "measure", N, completed, progressText);
+              await interRunPause();
+              rec = finalizeFullRun(pending, ctx(), this.longTasks, prepared.featureNames, tablesHash);
+            } else {
+              const pending = await measureRun(mode, data!, env);
+              completed++;
+              report(isWarmup ? "warmup" : "measure", N, completed, progressText);
+              await interRunPause();
+              rec = finalizeRun(pending, ctx(), this.longTasks);
+            }
             if (!isWarmup) records.push(rec);
           }
         }

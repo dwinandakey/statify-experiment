@@ -14,10 +14,10 @@ import type {
   WarmWorkerInit,
 } from "../types/experiment";
 import { MODES } from "../types/experiment";
+import { MODE_AGREEMENT_TOL, accuracyPassed } from "../services/analysis";
 import { fmtDiff, fmtInt, fmtMB, fmtMs, fmtNum } from "../services/format";
 
-/** Ambang kesamaan antar mode (kriteria selesai) dan terhadap produksi. */
-export const MODE_AGREEMENT_TOL = 1e-8;
+export { MODE_AGREEMENT_TOL };
 
 const num = "text-right tabular-nums";
 
@@ -170,10 +170,13 @@ function ModeCell({ mode }: { mode: keyof typeof MODES }) {
 }
 
 export function SummaryTable({ summaries }: { summaries: ModeSummary[] }) {
+  // Analisis lengkap: tambah formatter SPSS dan total sampai tabel siap
+  const full = summaries.some((s) => s.totalMs !== null);
   return (
     <Table data-testid="bl-exp-summary-table">
       <caption className="mb-1 text-left text-xs text-muted-foreground" style={{ captionSide: "top" }}>
         Milliseconds: median, [Q1–Q3], min–max over successful runs.
+        {full && " total = dispatch → SPSS tables formatted (compute + transfer + format)."}
       </caption>
       <TableHeader>
         <TableRow>
@@ -181,6 +184,8 @@ export function SummaryTable({ summaries }: { summaries: ModeSummary[] }) {
           <TableHead>Mode</TableHead>
           <TableHead className="text-right">compute</TableHead>
           <TableHead className="text-right">e2e</TableHead>
+          {full && <TableHead className="text-right">format</TableHead>}
+          {full && <TableHead className="text-right">total</TableHead>}
           <TableHead className="text-right">frame gap</TableHead>
         </TableRow>
       </TableHeader>
@@ -197,6 +202,12 @@ export function SummaryTable({ summaries }: { summaries: ModeSummary[] }) {
             </TableCell>
             <TableCell className={num}>{statCell(s.computeMs)}</TableCell>
             <TableCell className={num}>{statCell(s.e2eMs)}</TableCell>
+            {full && <TableCell className={num}>{statCell(s.formatMs)}</TableCell>}
+            {full && (
+              <TableCell className={num} data-testid={`bl-exp-total-${s.N}-${s.mode}`}>
+                {statCell(s.totalMs)}
+              </TableCell>
+            )}
             <TableCell className={num}>{statCell(s.maxFrameGapMs)}</TableCell>
           </TableRow>
         ))}
@@ -206,11 +217,13 @@ export function SummaryTable({ summaries }: { summaries: ModeSummary[] }) {
 }
 
 export function AccuracyTable({ accuracy }: { accuracy: AccuracyRow[] }) {
+  const full = accuracy.some((a) => a.tablesIdentical !== null);
   return (
     <Table data-testid="bl-exp-accuracy-table">
       <caption className="mb-1 text-left text-xs text-muted-foreground" style={{ captionSide: "top" }}>
-        Max absolute difference vs the first run of mode D at the same N, over all runs; pass if both &lt;{" "}
-        {MODE_AGREEMENT_TOL}.
+        {full
+          ? `Max difference vs the first run of mode D at the same N, over all runs. Pass if all SPSS tables are identical to that run and the scaled difference |Δ| / max(1, |value|) of B and S.E. is < ${MODE_AGREEMENT_TOL}.`
+          : `Max absolute difference vs the first run of mode D at the same N, over all runs; pass if both < ${MODE_AGREEMENT_TOL}.`}
       </caption>
       <TableHeader>
         <TableRow>
@@ -219,7 +232,11 @@ export function AccuracyTable({ accuracy }: { accuracy: AccuracyRow[] }) {
           <TableHead className="text-right whitespace-nowrap">|ΔB|</TableHead>
           <TableHead className="text-right whitespace-nowrap">|ΔS.E.|</TableHead>
           <TableHead className="text-right">Iter.</TableHead>
-          <TableHead className="text-right">Halv.</TableHead>
+          {full ? (
+            <TableHead className="text-right whitespace-nowrap">SPSS tables</TableHead>
+          ) : (
+            <TableHead className="text-right">Halv.</TableHead>
+          )}
           <TableHead>Pass</TableHead>
         </TableRow>
       </TableHeader>
@@ -235,9 +252,20 @@ export function AccuracyTable({ accuracy }: { accuracy: AccuracyRow[] }) {
             </TableCell>
             <TableCell className={num}>{fmtDiff(a.maxAbsDiffSe)}</TableCell>
             <TableCell className={num}>{fmtInt(a.iterations)}</TableCell>
-            <TableCell className={num}>{fmtInt(a.stepHalvings)}</TableCell>
+            {full ? (
+              <TableCell
+                className={num}
+                data-testid={`bl-exp-acc-tables-${a.N}-${a.mode}`}
+                data-identical={a.tablesIdentical ? String(a.tablesIdentical.identical) : ""}
+                data-total={a.tablesIdentical ? String(a.tablesIdentical.total) : ""}
+              >
+                {a.tablesIdentical ? `${a.tablesIdentical.identical}/${a.tablesIdentical.total}` : "–"}
+              </TableCell>
+            ) : (
+              <TableCell className={num}>{fmtInt(a.stepHalvings)}</TableCell>
+            )}
             <TableCell>
-              <PassBadge passed={a.maxAbsDiffBeta < MODE_AGREEMENT_TOL && a.maxAbsDiffSe < MODE_AGREEMENT_TOL} />
+              <PassBadge passed={accuracyPassed(a)} />
             </TableCell>
           </TableRow>
         ))}

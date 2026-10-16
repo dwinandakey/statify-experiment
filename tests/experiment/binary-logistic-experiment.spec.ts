@@ -6,11 +6,15 @@ import path from "node:path";
  * E2E menu "Binary Logistic (Experiment)" pada production build:
  * - Run once di keempat mode → beta & S.E. identik (< 1e-8), termasuk dummy kategorik
  * - Compare with production → cocok dengan Enter produksi (< 1e-4)
- * - Batch kecil → selesai, akurasi < 1e-8, CSV per run + meta.json
- * - OK di keempat konfigurasi (D, lalu A, B, C di dialog baru) → tiap laporan
- *   SPSS IDENTIK dengan dialog Binary Logistic produksi (data, variabel, dan
- *   opsi default yang sama), catatan kartu menyebut konfigurasinya, dan kartu
- *   eksperimen berisi performa run OK tersebut
+ * - Batch kecil inti IRLS → selesai, akurasi < 1e-8, CSV per run + meta.json
+ * - Batch kecil "Full analysis" → tabel SPSS tiap run identik dengan mode D,
+ *   CSV berisi formatMs/totalMs; hasil batch inti tetap tersimpan
+ * - OK di keempat konfigurasi pada dialog yang sama (dialog tetap terbuka) →
+ *   tiap laporan SPSS IDENTIK dengan dialog Binary Logistic produksi (data,
+ *   variabel, dan opsi default yang sama), catatan kartu menyebut
+ *   konfigurasinya, kartu eksperimen berisi performa run OK + ringkasan batch
+ * - OK tanpa tabel SPSS → hanya kartu performa
+ * - Close lalu buka lagi → variabel, hasil, dan status OK masih ada
  * - Smoke test dialog Binary Logistic produksi (satu run Enter)
  * - Tidak ada error console/pageerror dari kode aplikasi
  *
@@ -169,13 +173,17 @@ async function selectExperimentVariables(page: Page) {
   }
 }
 
-/** OK pada konfigurasi `mode`; dialog tertutup setelah analisis selesai dan output tertulis. */
-async function runOk(page: Page, mode: Mode) {
+/** OK pada konfigurasi `mode`; dialog tetap terbuka, status OK menghitung output ke-`count`. */
+async function runOk(page: Page, mode: Mode, count: number) {
   await page.getByTestId("bl-exp-tab-experiment").click();
   await page.getByTestId(`bl-exp-mode-${mode}`).click();
   await expect(page.getByTestId("bl-exp-ok-config")).toContainText(MODE_LABELS[mode]);
   await page.getByTestId("bl-exp-ok").click();
-  await expect(page.getByTestId("bl-exp-dialog")).toHaveCount(0, { timeout: 120_000 });
+  const status = page.getByTestId("bl-exp-ok-status");
+  await expect(status).toHaveAttribute("data-count", String(count), { timeout: 120_000 });
+  await expect(status).toContainText(MODE_LABELS[mode]);
+  await expect(page.getByTestId("bl-exp-dialog")).toBeVisible();
+  await expect(page.getByTestId("bl-exp-ok")).toBeEnabled();
 }
 
 /** Teks header komponen + output statistik sebuah kartu, urut DOM (tanpa judul dan catatan kartu). */
@@ -187,7 +195,7 @@ function cardOutputs(card: Locator): Promise<string[]> {
   );
 }
 
-test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV, OK in A/B/C/D", async ({ page }) => {
+test("Binary Logistic (Experiment): 4 modes, production comparison, core + full batch, OK in A/B/C/D", async ({ page }) => {
   const errors = collectErrors(page);
   await importFixture(page);
 
@@ -270,22 +278,69 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV,
   expect(meta.orders).toHaveLength(2 * 2);
   expect(meta.environment.crossOriginIsolated).toBe(true);
 
-  // --- OK di keempat konfigurasi: laporan SPSS + kartu performa ---
-  // D di dialog ini (kartu eksperimen juga memuat Run once, batch, perbandingan), lalu A, B, C di dialog baru
-  const okOrder: Mode[] = ["D", "A", "B", "C"];
-  await runOk(page, "D");
-  expect(await statisticsPerAnalytic(page, EXPERIMENT_TITLE)).toEqual([6]);
-  for (const m of okOrder.slice(1)) {
-    await openRegressionItem(page, "Binary Logistic (Experiment)...");
-    await expect(page.getByTestId("bl-exp-dialog")).toBeVisible();
-    await selectExperimentVariables(page);
-    await runOk(page, m);
+  // --- Batch kecil "Full analysis": pipeline OK per run, tabel SPSS tidak ditulis ---
+  await page.getByTestId("bl-exp-workload-full").click();
+  await expect(page.locator('[data-testid="bl-exp-batch-result"]')).toHaveCount(0);
+  await page.getByTestId("bl-exp-run-batch").click();
+  await expect(page.locator('[data-testid="bl-exp-batch-result"][data-status="done"][data-workload="full"]')).toBeVisible({
+    timeout: 300_000,
+  });
+  await expect(page.getByTestId("bl-exp-batch-chart")).toBeVisible();
+  await expect(page.getByTestId("bl-exp-total-300-D")).toBeVisible();
+  const tables = await page
+    .locator('[data-testid^="bl-exp-acc-tables-"]')
+    .evaluateAll((els) => els.map((e) => [e.getAttribute("data-identical"), e.getAttribute("data-total")]));
+  expect(tables).toHaveLength(2 * 4);
+  for (const [identical, total] of tables) expect(identical).toBe(total);
+  const fullAcc = await page
+    .locator('[data-testid^="bl-exp-acc-beta-"]')
+    .evaluateAll((els) => els.map((e) => Number(e.getAttribute("data-value"))));
+  console.log(`Full-analysis batch: SPSS tables identical in all runs; max|Δβ| vs D = ${Math.max(...fullAcc)}`);
+  expect(Math.max(...fullAcc)).toBeLessThan(1e-8);
+
+  const [fullCsvDownload] = await Promise.all([page.waitForEvent("download"), page.getByTestId("bl-exp-download-csv").click()]);
+  const fullCsv = fs.readFileSync((await fullCsvDownload.path())!, "utf8").trim().split(/\r?\n/).map(parseCsvLine);
+  const fullHeader = fullCsv[0];
+  const fullCol = (row: string[], name: string) => row[fullHeader.indexOf(name)];
+  expect(fullCsv).toHaveLength(1 + 2 * 2 * 4);
+  for (const row of fullCsv.slice(1)) {
+    expect(fullCol(row, "workload")).toBe("full");
+    expect(fullCol(row, "tablesIdenticalToD")).toBe("true");
+    expect(Number(fullCol(row, "formatMs"))).toBeGreaterThan(0);
+    expect(Number(fullCol(row, "totalMs"))).toBeGreaterThanOrEqual(Number(fullCol(row, "e2eMs")));
   }
+
+  // Hasil batch inti IRLS tetap tersimpan saat workload dipindah lagi
+  await page.getByTestId("bl-exp-workload-core").click();
+  await expect(page.locator('[data-testid="bl-exp-batch-result"][data-workload="core"]')).toBeVisible();
+
+  // --- OK di keempat konfigurasi pada dialog yang sama: laporan SPSS + kartu performa ---
+  const okOrder: Mode[] = ["D", "A", "B", "C"];
+  for (const [i, m] of okOrder.entries()) await runOk(page, m, i + 1);
+  await expect(page.getByTestId("bl-exp-n-original")).toHaveText("300"); // pilihan variabel tidak ter-reset
   const ours = await statisticsPerAnalytic(page, SPSS_TITLE);
   expect(ours).toHaveLength(okOrder.length);
   expect(ours[0]).toBeGreaterThan(5);
   expect(new Set(ours).size).toBe(1);
-  expect(await statisticsPerAnalytic(page, EXPERIMENT_TITLE)).toEqual([6, 1, 1, 1]);
+  // OK + Run once (2) + batch inti (2) + batch analisis lengkap (2) + perbandingan produksi
+  expect(await statisticsPerAnalytic(page, EXPERIMENT_TITLE)).toEqual([8, 8, 8, 8]);
+
+  // --- OK tanpa tabel SPSS: hanya kartu performa ---
+  await page.getByTestId("bl-exp-include-spss").click();
+  await expect(page.getByTestId("bl-exp-ok-config")).toContainText("performance only");
+  await runOk(page, "D", okOrder.length + 1);
+  expect(await statisticsPerAnalytic(page, SPSS_TITLE)).toEqual(ours);
+  expect(await statisticsPerAnalytic(page, EXPERIMENT_TITLE)).toEqual([8, 8, 8, 8, 8]);
+
+  // --- Close lalu buka lagi: pilihan dan hasil masih ada ---
+  await page.getByTestId("bl-exp-close").click();
+  await expect(page.getByTestId("bl-exp-dialog")).toHaveCount(0);
+  await openRegressionItem(page, "Binary Logistic (Experiment)...");
+  await expect(page.getByTestId("bl-exp-n-original")).toHaveText("300");
+  await expect(page.getByTestId("bl-exp-ok-status")).toHaveAttribute("data-count", String(okOrder.length + 1));
+  await expect(page.locator('[data-testid="bl-exp-batch-result"][data-workload="core"]')).toBeVisible();
+  await expect(page.locator('[data-testid="bl-exp-single-result"][data-mode="D"]')).toBeVisible();
+  await expect(page.getByTestId("bl-exp-include-spss")).not.toBeChecked();
 
   // --- Dialog Binary Logistic produksi dengan data & variabel yang sama ---
   await openRegressionItem(page, "Binary Logistic...");
@@ -316,29 +371,33 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV,
   const logHeaders = await page
     .locator('[data-testid^="log-header-"]')
     .evaluateAll((els) => els.map((e) => (e.textContent ?? "").replace(/^Log \d+:\s*/, "")));
-  expect(logHeaders).toHaveLength(okOrder.length + 1);
+  expect(logHeaders).toHaveLength(okOrder.length + 2);
   expect(new Set(logHeaders).size).toBe(1);
 
-  // --- Kartu eksperimen: performa run OK per konfigurasi ---
+  // --- Kartu eksperimen: performa run OK per konfigurasi + ringkasan kedua batch ---
   const experimentCards = page.locator('[data-testid^="result-analytic-"]').filter({
     has: page.locator('[data-testid^="analytic-title-"]', { hasText: EXPERIMENT_TITLE }),
   });
-  await expect(experimentCards).toHaveCount(okOrder.length);
-  for (const [i, m] of okOrder.entries()) {
+  await expect(experimentCards).toHaveCount(okOrder.length + 1);
+  for (const [i, m] of [...okOrder, "D" as Mode].entries()) {
     const card = experimentCards.nth(i);
     await expect(card).toContainText(`computed with ${MODE_LABELS[m]}`);
     // Judul statistik tidak dirender viewer; judul tabel yang terlihat menyebut konfigurasinya
     await expect(card).toContainText(`Analysis run performance – ${MODE_LABELS[m]}`);
+    await expect(card).toContainText("Batch summary – IRLS core");
+    await expect(card).toContainText("Batch summary – full analysis + SPSS tables");
+    await expect(card).toContainText("SPSS tables identical to D");
+    await expect(card).toContainText("Experiment vs production");
     const perf = (await card.locator('[data-testid^="result-output-"]').first().innerText()).replace(/\s+/g, " ");
     const metric = (name: string) => perf.match(new RegExp(`${name} ([\\d.,]+)`))?.[1] ?? "?";
     expect(metric("computeMs")).not.toBe("?");
+    expect(metric("totalMs")).not.toBe("?");
     console.log(
-      `OK ${m}: computeMs = ${metric("computeMs")}, e2eMs = ${metric("e2eMs")}, maxFrameGapMs = ${metric("maxFrameGapMs")}`
+      `OK ${m}${i === okOrder.length ? " (performance only)" : ""}: computeMs = ${metric("computeMs")}, ` +
+        `formatMs = ${metric("formatMs")}, totalMs = ${metric("totalMs")}, maxFrameGapMs = ${metric("maxFrameGapMs")}`
     );
   }
-  await expect(experimentCards.nth(0)).toContainText("Batch summary");
-  await expect(experimentCards.nth(0)).toContainText("Experiment vs production");
-  await expect(experimentCards.nth(0)).toContainText("PASS");
+  await expect(experimentCards.nth(okOrder.length)).toContainText("SPSS tables were not written");
   console.log(`SPSS output of OK A/B/C/D identical to production (${productionOutputs.length} blocks); syntax: ${logHeaders[0]}`);
 
   console.log(`Console/page errors:\n${errors.join("\n") || "(none)"}`);
