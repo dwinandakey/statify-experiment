@@ -26,6 +26,35 @@ export function calculate_binary_logistic(data_x, rows, cols, data_y, config_jso
 }
 
 /**
+ * Sama dengan `calculate_binary_logistic` produksi untuk metode Enter (string
+ * JSON identik), ditambah pencatatan waktu di dalam Wasm. Waktunya dibaca
+ * setelah timer JavaScript berhenti lewat `last_full_timings()`, supaya
+ * jalur kembali panggilan yang diukur tetap sama (satu string JSON).
+ * @param {Float64Array} data_x
+ * @param {number} rows
+ * @param {number} cols
+ * @param {Float64Array} data_y
+ * @param {string} config_json
+ * @param {string} feature_names_json
+ * @returns {any}
+ */
+export function calculate_binary_logistic_timed(data_x, rows, cols, data_y, config_json, feature_names_json) {
+    const ptr0 = passArrayF64ToWasm0(data_x, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF64ToWasm0(data_y, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passStringToWasm0(feature_names_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.calculate_binary_logistic_timed(ptr0, len0, rows, cols, ptr1, len1, ptr2, len2, ptr3, len3);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * @param {Float64Array} data_x
  * @param {number} rows
  * @param {number} cols
@@ -88,6 +117,18 @@ export function irls_core_bench(data_x, n, p, data_y, max_iter, tol) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * `[analysisMs, serializeMs]` dari panggilan `calculate_binary_logistic_timed`
+ * terakhir (NaN bila gagal atau di luar wasm32).
+ * @returns {Float64Array}
+ */
+export function last_full_timings() {
+    const ret = wasm.last_full_timings();
+    var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+    return v1;
 }
 function __wbg_get_imports() {
     const import0 = {
@@ -216,6 +257,11 @@ function debugString(val) {
     }
     // TODO we could test for more things here, like `Set`s and `Map`s.
     return className;
+}
+
+function getArrayF64FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
 }
 
 let cachedDataViewMemory0 = null;

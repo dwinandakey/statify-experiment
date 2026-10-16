@@ -1,8 +1,10 @@
 //! Modul benchmark eksperimen 2×2 (JavaScript vs Rust-Wasm × main thread vs
 //! Web Worker). Tidak dipakai oleh analisis produksi; hanya diekspor lewat
-//! `irls_core_bench` di lib.rs dan dibangun ke
+//! `irls_core_bench` di lib.rs serta `calculate_binary_logistic_timed` dan
+//! `last_full_timings` (enter_timed.rs), lalu dibangun ke
 //! public/workers/Regression/BinaryExperiment/pkg (npm run build:wasm:experiment).
 
+pub mod enter_timed;
 pub mod irls_core;
 
 use serde::Serialize;

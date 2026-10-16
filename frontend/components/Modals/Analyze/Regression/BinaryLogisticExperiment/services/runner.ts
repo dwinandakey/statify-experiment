@@ -39,13 +39,15 @@ import {
   LongTaskCollector,
   bytesToMB,
   captureEnvironment,
-  heapUsedMB,
+  estimateRefreshInterval,
   interRunPause,
+  mainHeapUsedMB,
   nextTask,
+  sanitizeFrameInterval,
 } from "./metrics";
 import { resample, resampleFull } from "./prepareData";
 import { deriveSeed, mulberry32, shuffleInPlace } from "./prng";
-import { coefficientsFromResult, formatSpssTables, spssTablesHash } from "./spssFormat";
+import { coefficientsFromResult, formatSpssTables, spssTablesHash, stepHalvingsFromResult } from "./spssFormat";
 
 // Modul di /public, dimuat browser apa adanya (tanpa webpack/SWC). Specifier
 // disimpan di konstanta: literal path absolut di import() memicu TS2307 karena
@@ -88,6 +90,17 @@ interface WasmPkgModule {
     configJson: string,
     featureNamesJson: string
   ): string;
+  /** Jalur Enter produksi yang sama (JSON identik) + waktu di dalam Wasm (bench/enter_timed.rs). */
+  calculate_binary_logistic_timed(
+    x: Float64Array,
+    rows: number,
+    cols: number,
+    y: Float64Array,
+    configJson: string,
+    featureNamesJson: string
+  ): string;
+  /** [analysisMs, serializeMs] panggilan calculate_binary_logistic_timed terakhir. */
+  last_full_timings(): Float64Array;
 }
 
 interface EnterModule {
@@ -273,6 +286,12 @@ export class WorkerPool {
 
 let runCounter = 0;
 
+/** Waktu di dalam Wasm untuk analisis lengkap (mode C/D). */
+interface WasmFullTimings {
+  analysisMs: number;
+  serializeMs: number;
+}
+
 /** Hasil satu dispatch terukur: t0/t1 di jam main thread, computeMs di konteks eksekusi. */
 interface Timed<T> {
   t0: number;
@@ -280,6 +299,8 @@ interface Timed<T> {
   computeMs: number;
   raw: T;
   wasmMemoryBytes: number | null;
+  /** Mode D workload full: dikirim worker bersama hasil. */
+  wasmTimings?: WasmFullTimings | null;
 }
 
 /**
@@ -308,7 +329,9 @@ function runOnWorker<T>(
       if (!m || m.runId !== runId) return;
       cleanup();
       if (m.type === "result") {
-        resolve({ t0, t1, computeMs: m.computeMs, raw: m.result, wasmMemoryBytes: m.wasmMemoryBytes ?? null });
+        const wasmTimings =
+          typeof m.wasmCoreMs === "number" ? { analysisMs: m.wasmCoreMs, serializeMs: m.wasmSerializeMs } : null;
+        resolve({ t0, t1, computeMs: m.computeMs, raw: m.result, wasmMemoryBytes: m.wasmMemoryBytes ?? null, wasmTimings });
       } else {
         reject(new Error(m.message || "Worker error"));
       }
@@ -397,7 +420,7 @@ interface PendingRun {
   error: string | null;
   frames: FrameStats;
   windowEnd: number;
-  heapUsedMB: number | null;
+  mainHeapUsedMB: number | null;
   wasmMemoryBytes: number | null;
   pageHidden: boolean;
 }
@@ -410,7 +433,7 @@ interface Measured<T> {
   error: string | null;
   frames: FrameStats;
   windowEnd: number;
-  heapUsedMB: number | null;
+  mainHeapUsedMB: number | null;
   wasmMemoryBytes: number | null;
   pageHidden: boolean;
 }
@@ -458,7 +481,7 @@ async function measureWindow<T>(
   // Tunggu satu frame lagi agar gap yang memuat blocking ikut tercatat
   const frames = await env.monitor.stop();
   const windowEnd = performance.now();
-  const heap = heapUsedMB();
+  const heap = mainHeapUsedMB();
   if (env.coldWorkers && spawned) spawned.worker.terminate();
   if (abort) throw abort;
 
@@ -470,7 +493,7 @@ async function measureWindow<T>(
     error,
     frames,
     windowEnd,
-    heapUsedMB: heap,
+    mainHeapUsedMB: heap,
     wasmMemoryBytes,
     pageHidden: hiddenAtStart || document.hidden || visibilityChanges !== visibilityAtStart,
   };
@@ -534,6 +557,8 @@ interface FullOutput {
   formatMs: number;
   /** Tabel SPSS selesai diformat (jam main thread). */
   tDone: number;
+  /** Mode C/D: waktu di dalam Wasm (analisis, serialisasi JSON). */
+  wasmTimings: WasmFullTimings | null;
 }
 
 type SpssFormatter = (raw: unknown) => BinaryLogisticOutput;
@@ -616,7 +641,7 @@ async function measureFullRun(
       timed = timedCall(() => enter!.calculateBinaryLogistic(X, rows, cols, y, configJson, featureNamesJson));
     } else if (mode === "C") {
       timed = timedCall(
-        () => JSON.parse(wasmMain!.pkg.calculate_binary_logistic(X, rows, cols, y, configJson, featureNamesJson)) as unknown,
+        () => JSON.parse(wasmMain!.pkg.calculate_binary_logistic_timed(X, rows, cols, y, configJson, featureNamesJson)) as unknown,
         () => wasmMain!.exports.memory.buffer.byteLength
       );
     } else {
@@ -630,7 +655,13 @@ async function measureFullRun(
     const f0 = performance.now();
     const formatted = format(timed.raw);
     const tDone = performance.now();
-    return { ...timed, raw: { result: timed.raw, formatted, formatMs: tDone - f0, tDone } };
+    // Mode C: waktu di dalam Wasm dibaca setelah t1 dan tDone (tidak masuk computeMs/totalMs)
+    let wasmTimings = timed.wasmTimings ?? null;
+    if (mode === "C") {
+      const [analysisMs, serializeMs] = wasmMain!.pkg.last_full_timings();
+      wasmTimings = { analysisMs, serializeMs };
+    }
+    return { ...timed, raw: { result: timed.raw, formatted, formatMs: tDone - f0, tDone, wasmTimings } };
   });
 
   return { mode, timestamp, spawnMs, initMs, workerCreated, engineInitMs, ...m };
@@ -685,11 +716,14 @@ function finalizeRun(pending: PendingRun, ctx: RecordContext, longTasks: LongTas
     tablesHash: null,
     maxFrameGapMs: pending.frames.maxFrameGapMs,
     droppedFrames: pending.frames.droppedFrames,
+    longGapCount: pending.frames.longGapCount,
     frameCount: pending.frames.frameCount,
+    frameIntervalMs: pending.frames.frameIntervalMs,
     longTaskCount: lt ? lt.count : null,
     longTaskTotalMs: lt ? lt.totalMs : null,
-    heapUsedMB: pending.heapUsedMB,
+    mainHeapUsedMB: pending.mainHeapUsedMB,
     wasmMemoryMB: bytesToMB(pending.wasmMemoryBytes),
+    wasmSerializeMs: null,
     pageHidden: pending.pageHidden,
     result: pending.raw && !pending.error ? normalizeResult(pending.raw, pending.mode) : null,
     error: pending.error,
@@ -730,13 +764,18 @@ function finalizeFullRun(
     tablesHash: out ? tablesHash : null,
     maxFrameGapMs: pending.frames.maxFrameGapMs,
     droppedFrames: pending.frames.droppedFrames,
+    longGapCount: pending.frames.longGapCount,
     frameCount: pending.frames.frameCount,
+    frameIntervalMs: pending.frames.frameIntervalMs,
     longTaskCount: lt ? lt.count : null,
     longTaskTotalMs: lt ? lt.totalMs : null,
-    heapUsedMB: pending.heapUsedMB,
+    mainHeapUsedMB: pending.mainHeapUsedMB,
     wasmMemoryMB: bytesToMB(pending.wasmMemoryBytes),
+    wasmSerializeMs: out?.wasmTimings ? out.wasmTimings.serializeMs : null,
     pageHidden: pending.pageHidden,
-    result: out ? coefficientsFromResult(out.result, featureNames) : null,
+    result: out
+      ? { ...coefficientsFromResult(out.result, featureNames), wasmCoreMs: out.wasmTimings ? out.wasmTimings.analysisMs : null }
+      : null,
     error: pending.error,
     timestamp: pending.timestamp,
   };
@@ -757,6 +796,23 @@ export class ExperimentSession {
   private readonly longTasks = new LongTaskCollector();
   private pool = new WorkerPool();
   private busy = false;
+  private frameIntervalReady: Promise<void> | null = null;
+
+  /**
+   * T untuk droppedFrames: interval refresh terukur saat idle (sekali per
+   * sesi, di luar pengukuran), atau nilai dari captureEnvironment batch.
+   */
+  private ensureFrameInterval(measuredMs?: number | null): Promise<void> {
+    if (measuredMs !== undefined) {
+      this.monitor.frameIntervalMs = sanitizeFrameInterval(measuredMs);
+      this.frameIntervalReady = Promise.resolve();
+    } else if (!this.frameIntervalReady) {
+      this.frameIntervalReady = estimateRefreshInterval().then((ms) => {
+        this.monitor.frameIntervalMs = sanitizeFrameInterval(ms);
+      });
+    }
+    return this.frameIntervalReady;
+  }
 
   get longTaskSupported(): boolean {
     return this.longTasks.supported;
@@ -783,6 +839,7 @@ export class ExperimentSession {
     this.assertIdle();
     this.busy = true;
     try {
+      await this.ensureFrameInterval();
       this.longTasks.start();
       const env = this.env(opts.coldWorkers, opts.maxIter, opts.tol);
       const pending = await measureRun(mode, data, env);
@@ -815,6 +872,7 @@ export class ExperimentSession {
     this.assertIdle();
     this.busy = true;
     try {
+      await this.ensureFrameInterval();
       this.longTasks.start();
       const env = this.env(opts.coldWorkers, DEFAULT_MAX_ITER, DEFAULT_TOL);
       const input = prepared.full;
@@ -838,14 +896,19 @@ export class ExperimentSession {
         initMs: pending.initMs,
         maxFrameGapMs: pending.frames.maxFrameGapMs,
         droppedFrames: pending.frames.droppedFrames,
+        longGapCount: pending.frames.longGapCount,
         frameCount: pending.frames.frameCount,
+        frameIntervalMs: pending.frames.frameIntervalMs,
         longTaskCount: lt ? lt.count : null,
         longTaskTotalMs: lt ? lt.totalMs : null,
-        heapUsedMB: pending.heapUsedMB,
+        mainHeapUsedMB: pending.mainHeapUsedMB,
         wasmMemoryMB: bytesToMB(pending.wasmMemoryBytes),
+        wasmSerializeMs: out?.wasmTimings ? out.wasmTimings.serializeMs : null,
         pageHidden: pending.pageHidden,
         formatMs: out ? out.formatMs : null,
         totalMs: out ? out.tDone - pending.t0 : null,
+        wasmCoreMs: out?.wasmTimings ? out.wasmTimings.analysisMs : null,
+        stepHalvings: out ? stepHalvingsFromResult(out.result) : null,
         result: out ? out.result : null,
         formatted: out ? out.formatted : null,
         error: pending.error,
@@ -876,6 +939,7 @@ export class ExperimentSession {
     let errorMessageText: string | null = null;
     report("preparing", null, 0, "Capturing environment and loading modules…");
     const environment = await captureEnvironment();
+    await this.ensureFrameInterval(environment.refreshIntervalMs);
     const meta: BatchMeta = {
       batchId,
       startedAt: new Date().toISOString(),

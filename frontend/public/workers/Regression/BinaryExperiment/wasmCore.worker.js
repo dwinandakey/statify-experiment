@@ -15,13 +15,17 @@
  * X dan y ke memori linear Wasm dan serialisasi hasil (serde_wasm_bindgen).
  * result.coreMs adalah durasi inti murni yang diukur di dalam Wasm.
  *
- * Analisis lengkap (tombol OK): calculate_binary_logistic produksi dari paket
- * yang sama; computeMs mencakup JSON.parse hasilnya (string JSON dari Rust).
+ * Analisis lengkap (tombol OK, batch workload full): calculate_binary_logistic_timed
+ * dari paket yang sama, yaitu jalur Enter produksi dengan JSON identik plus waktu
+ * di dalam Wasm; computeMs mencakup JSON.parse hasilnya (string JSON dari Rust).
  *   { type: "init_full" } → { type: "ready_full", initMs }
  *   { type: "run_full", runId, X, y, rows, cols, configJson, featureNamesJson }
- *     → { type: "result", runId, result, computeMs, wasmMemoryBytes }
+ *     → { type: "result", runId, result, computeMs, wasmMemoryBytes, wasmCoreMs, wasmSerializeMs }
+ * wasmCoreMs = analisis di dalam Wasm (tanpa salin-masuk dan serialisasi),
+ * wasmSerializeMs = serde_json::to_string di dalam Wasm; keduanya dibaca
+ * setelah computeMs dihitung.
  */
-import init, { irls_core_bench, calculate_binary_logistic } from "./pkg/statify_logistic.js";
+import init, { irls_core_bench, calculate_binary_logistic_timed, last_full_timings } from "./pkg/statify_logistic.js";
 
 let initPromise = null;
 let wasm = null;
@@ -68,9 +72,18 @@ self.onmessage = async (event) => {
     try {
       await ensureInit();
       const t0 = performance.now();
-      const result = JSON.parse(calculate_binary_logistic(X, rows, cols, y, configJson, featureNamesJson));
+      const result = JSON.parse(calculate_binary_logistic_timed(X, rows, cols, y, configJson, featureNamesJson));
       const computeMs = performance.now() - t0;
-      self.postMessage({ type: "result", runId, result, computeMs, wasmMemoryBytes: wasmMemoryBytes() });
+      const [wasmCoreMs, wasmSerializeMs] = last_full_timings();
+      self.postMessage({
+        type: "result",
+        runId,
+        result,
+        computeMs,
+        wasmMemoryBytes: wasmMemoryBytes(),
+        wasmCoreMs,
+        wasmSerializeMs,
+      });
     } catch (err) {
       self.postMessage({ type: "error", runId, message: errorMessage(err) });
     }

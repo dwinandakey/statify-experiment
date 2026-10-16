@@ -105,6 +105,9 @@ export function RunMetricsTable({
         {r?.wasmCoreMs !== null && r?.wasmCoreMs !== undefined && (
           <MetricRow label="wasmCoreMs" value={fmtMs(r.wasmCoreMs, 3)} hint="inside Wasm, excl. copy-in & serialization" />
         )}
+        {record.wasmSerializeMs !== null && (
+          <MetricRow label="wasmSerializeMs" value={fmtMs(record.wasmSerializeMs, 3)} hint="serde_json inside Wasm" />
+        )}
         {record.workerStart === "cold" && (
           <>
             <MetricRow label="spawnMs" value={fmtMs(record.spawnMs, 3)} hint="new Worker → ready, minus initMs" />
@@ -129,13 +132,22 @@ export function RunMetricsTable({
           />
         )}
         <MetricRow label="maxFrameGapMs" value={fmtMs(record.maxFrameGapMs, 1)} hint={`${fmtInt(record.frameCount)} frames observed`} />
-        <MetricRow label="droppedFrames" value={fmtInt(record.droppedFrames)} hint="rAF gaps > 2 × 16.7 ms" />
+        <MetricRow
+          label="droppedFrames"
+          value={fmtInt(record.droppedFrames)}
+          hint={`≈ missed frames: Σ round(gap / T) − 1, T = ${fmtMs(record.frameIntervalMs, 1)} ms`}
+        />
+        <MetricRow label="longGapCount" value={fmtInt(record.longGapCount)} hint="number of gaps > 2T (not frames)" />
         <MetricRow
           label="longTasks"
           value={record.longTaskCount === null ? "n/a" : `${record.longTaskCount} · ${fmtMs(record.longTaskTotalMs, 1)} ms`}
           hint={record.longTaskCount === null ? "PerformanceObserver longtask not supported" : "count · total"}
         />
-        <MetricRow label="heapUsedMB" value={fmtMB(record.heapUsedMB)} hint="main-thread JS heap (Chromium only)" />
+        <MetricRow
+          label="mainHeapUsedMB"
+          value={fmtMB(record.mainHeapUsedMB)}
+          hint="main-thread JS heap only (Chromium); worker memory not included, do not compare across locations"
+        />
         {record.wasmMemoryMB !== null && <MetricRow label="wasmMemoryMB" value={fmtMB(record.wasmMemoryMB)} hint="wasm linear memory" />}
       </TableBody>
     </Table>
@@ -175,7 +187,8 @@ export function SummaryTable({ summaries }: { summaries: ModeSummary[] }) {
   return (
     <Table data-testid="bl-exp-summary-table">
       <caption className="mb-1 text-left text-xs text-muted-foreground" style={{ captionSide: "top" }}>
-        Milliseconds: median, [Q1–Q3], min–max over successful runs.
+        Milliseconds: median, [Q1–Q3], min–max over successful runs. in Wasm = wasmCoreMs (C/D only): time inside
+        Wasm without copying the input in and without serializing the result.
         {full && " total = dispatch → SPSS tables formatted (compute + transfer + format)."}
       </caption>
       <TableHeader>
@@ -187,6 +200,7 @@ export function SummaryTable({ summaries }: { summaries: ModeSummary[] }) {
           {full && <TableHead className="text-right">format</TableHead>}
           {full && <TableHead className="text-right">total</TableHead>}
           <TableHead className="text-right">frame gap</TableHead>
+          <TableHead className="text-right whitespace-nowrap">in Wasm</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -209,6 +223,7 @@ export function SummaryTable({ summaries }: { summaries: ModeSummary[] }) {
               </TableCell>
             )}
             <TableCell className={num}>{statCell(s.maxFrameGapMs)}</TableCell>
+            <TableCell className={num}>{statCell(s.wasmCoreMs)}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -232,11 +247,8 @@ export function AccuracyTable({ accuracy }: { accuracy: AccuracyRow[] }) {
           <TableHead className="text-right whitespace-nowrap">|ΔB|</TableHead>
           <TableHead className="text-right whitespace-nowrap">|ΔS.E.|</TableHead>
           <TableHead className="text-right">Iter.</TableHead>
-          {full ? (
-            <TableHead className="text-right whitespace-nowrap">SPSS tables</TableHead>
-          ) : (
-            <TableHead className="text-right">Halv.</TableHead>
-          )}
+          <TableHead className="text-right">Halv.</TableHead>
+          {full && <TableHead className="text-right whitespace-nowrap">SPSS tables</TableHead>}
           <TableHead>Pass</TableHead>
         </TableRow>
       </TableHeader>
@@ -252,7 +264,8 @@ export function AccuracyTable({ accuracy }: { accuracy: AccuracyRow[] }) {
             </TableCell>
             <TableCell className={num}>{fmtDiff(a.maxAbsDiffSe)}</TableCell>
             <TableCell className={num}>{fmtInt(a.iterations)}</TableCell>
-            {full ? (
+            <TableCell className={num}>{fmtInt(a.stepHalvings)}</TableCell>
+            {full && (
               <TableCell
                 className={num}
                 data-testid={`bl-exp-acc-tables-${a.N}-${a.mode}`}
@@ -261,8 +274,6 @@ export function AccuracyTable({ accuracy }: { accuracy: AccuracyRow[] }) {
               >
                 {a.tablesIdentical ? `${a.tablesIdentical.identical}/${a.tablesIdentical.total}` : "–"}
               </TableCell>
-            ) : (
-              <TableCell className={num}>{fmtInt(a.stepHalvings)}</TableCell>
             )}
             <TableCell>
               <PassBadge passed={accuracyPassed(a)} />

@@ -138,13 +138,20 @@ export interface RunMetrics {
   /** Mode worker cold: inisialisasi di dalam worker (wasm init untuk D). */
   initMs: number | null;
   maxFrameGapMs: number;
-  /** Jumlah gap rAF > 2 × 16,7 ms. */
+  /** Perkiraan frame yang terlewat: Σ max(0, round(gap / T) − 1), T = frameIntervalMs. */
   droppedFrames: number;
+  /** Jumlah gap rAF > 2T (jumlah gap, bukan jumlah frame). */
+  longGapCount: number;
   frameCount: number;
+  /** Interval refresh T yang dipakai (terukur saat idle; cadangan 1000/60 ms). */
+  frameIntervalMs: number;
   longTaskCount: number | null;
   longTaskTotalMs: number | null;
-  heapUsedMB: number | null;
+  /** Heap JS main thread setelah run (Chromium). Heap worker tidak terukur: jangan dibandingkan antarlokasi. */
+  mainHeapUsedMB: number | null;
   wasmMemoryMB: number | null;
+  /** Workload "full" mode C/D: serde_json::to_string di dalam Wasm (ms). */
+  wasmSerializeMs: number | null;
   /** Tab tersembunyi kapan pun selama run (rAF berhenti → metrik frame tidak valid). */
   pageHidden: boolean;
 }
@@ -196,6 +203,10 @@ export interface FullRunRecord extends RunMetrics {
   formatMs: number | null;
   /** Dispatch → tabel SPSS selesai diformat. */
   totalMs: number | null;
+  /** Mode C/D: analisis di dalam Wasm tanpa salin-masuk dan serialisasi (ms). */
+  wasmCoreMs: number | null;
+  /** Step-halving pada fit model akhir (fitting_warnings.step_halving_count). */
+  stepHalvings: number | null;
   /** Objek hasil mentah mesin (struktur LogisticResult produksi), null bila gagal. */
   result: unknown;
   /** Tabel SPSS hasil formatter produksi, siap ditulis ke output viewer. */
@@ -306,6 +317,8 @@ export interface ModeSummary {
   /** Workload "full" saja (null untuk "core"). */
   formatMs: SummaryStats | null;
   totalMs: SummaryStats | null;
+  /** Mode C/D saja: durasi di dalam Wasm (inti IRLS, atau analisis tanpa serialisasi). */
+  wasmCoreMs: SummaryStats | null;
 }
 
 export interface AccuracyRow {

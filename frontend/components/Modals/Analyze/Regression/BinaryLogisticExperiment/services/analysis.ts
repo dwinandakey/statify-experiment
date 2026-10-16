@@ -39,6 +39,7 @@ export function computeSummaries(records: RunRecord[]): ModeSummary[] {
         maxFrameGapMs: summarize(good.map((r) => r.maxFrameGapMs)),
         formatMs: summarizeOptional(good.map((r) => r.formatMs)),
         totalMs: summarizeOptional(good.map((r) => r.totalMs)),
+        wasmCoreMs: summarizeOptional(good.map((r) => r.result?.wasmCoreMs ?? null)),
       });
     }
   }

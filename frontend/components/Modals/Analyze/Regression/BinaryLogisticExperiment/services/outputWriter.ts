@@ -102,9 +102,16 @@ function batchSections(workload: Workload, result: BatchResult): ExperimentSecti
 
   const summaryColumns: [string, string][] = [["N", "n"], ["Mode", "mode"], ["Runs", "runs"], ["computeMs", "compute"], ["e2eMs", "e2e"]];
   if (full) summaryColumns.push(["formatMs", "format"], ["totalMs", "total"]);
-  summaryColumns.push(["maxFrameGapMs", "gap"]);
+  summaryColumns.push(["maxFrameGapMs", "gap"], ["wasmCoreMs (in Wasm)", "inwasm"]);
 
-  const accuracyColumns: [string, string][] = [["N", "n"], ["Mode", "mode"], ["max |ΔB|", "db"], ["max |ΔS.E.|", "dse"], ["Iterations", "it"]];
+  const accuracyColumns: [string, string][] = [
+    ["N", "n"],
+    ["Mode", "mode"],
+    ["max |ΔB|", "db"],
+    ["max |ΔS.E.|", "dse"],
+    ["Iterations", "it"],
+    ["Step-halvings", "halv"],
+  ];
   if (full) accuracyColumns.push(["SPSS tables identical to D", "tables"]);
 
   return [
@@ -117,7 +124,8 @@ function batchSections(workload: Workload, result: BatchResult): ExperimentSecti
         (full
           ? "Each run computed the full analysis and built the SPSS tables (not written); totalMs = dispatch → tables formatted. "
           : "") +
-        "Values in ms: median [Q1–Q3]. Per-run data: Download CSV in the dialog.",
+        "Values in ms: median [Q1–Q3]; wasmCoreMs = time inside Wasm without input copy and result serialization " +
+        "(C/D only). Per-run data: Download CSV in the dialog.",
       component: text.component,
       spec: table(
         `Batch summary – ${text.name} (ms)`,
@@ -131,6 +139,7 @@ function batchSections(workload: Workload, result: BatchResult): ExperimentSecti
           format: cell(sm.formatMs),
           total: cell(sm.totalMs),
           gap: cell(sm.maxFrameGapMs),
+          inwasm: cell(sm.wasmCoreMs),
         }))
       ),
     },
@@ -149,6 +158,7 @@ function batchSections(workload: Workload, result: BatchResult): ExperimentSecti
           db: fmtDiff(a.maxAbsDiffBeta),
           dse: fmtDiff(a.maxAbsDiffSe),
           it: fmtInt(a.iterations),
+          halv: fmtInt(a.stepHalvings),
           tables: a.tablesIdentical ? `${a.tablesIdentical.identical}/${a.tablesIdentical.total}` : "–",
         }))
       ),
@@ -195,6 +205,7 @@ export function buildExperimentSections(results: ExperimentResults): ExperimentS
           ["initMs", fmtMs(record.initMs, 3)],
           ["maxFrameGapMs", fmtMs(record.maxFrameGapMs, 1)],
           ["droppedFrames", fmtInt(record.droppedFrames)],
+          ["longGapCount", fmtInt(record.longGapCount)],
           ["longTaskCount", fmtInt(record.longTaskCount)],
           ["longTaskTotalMs", fmtMs(record.longTaskTotalMs, 1)],
         ].map(([metric, value]) => ({ metric, value }))
@@ -242,6 +253,12 @@ function okRunSection(run: FullRunRecord, saveMs: number | null): ExperimentSect
   const info = MODES[run.mode];
   const rows: [string, string, string][] = [
     ["computeMs", fmtMs(run.computeMs, 3), "full analysis, measured where it runs"],
+    ...(run.wasmCoreMs !== null
+      ? ([
+          ["wasmCoreMs", fmtMs(run.wasmCoreMs, 3), "analysis inside Wasm, excl. input copy and serialization"],
+          ["wasmSerializeMs", fmtMs(run.wasmSerializeMs, 3), "serde_json inside Wasm"],
+        ] as [string, string, string][])
+      : []),
     ["e2eMs", fmtMs(run.e2eMs, 3), "main thread: dispatch → result available"],
     ["overheadMs", fmtMs(run.overheadMs, 3), "e2eMs − computeMs"],
     ["formatMs", fmtMs(run.formatMs, 3), "production SPSS formatter on the main thread"],
@@ -254,13 +271,19 @@ function okRunSection(run: FullRunRecord, saveMs: number | null): ExperimentSect
   }
   rows.push(
     ["maxFrameGapMs", fmtMs(run.maxFrameGapMs, 1), `${fmtInt(run.frameCount)} frames observed`],
-    ["droppedFrames", fmtInt(run.droppedFrames), "rAF gaps > 2 × 16.7 ms"],
+    ["droppedFrames", fmtInt(run.droppedFrames), `≈ missed frames: Σ round(gap / T) − 1, T = ${fmtMs(run.frameIntervalMs, 1)} ms`],
+    ["longGapCount", fmtInt(run.longGapCount), "number of gaps > 2T (not frames)"],
     [
       "longTasks",
       run.longTaskCount === null ? "n/a" : `${run.longTaskCount} · ${fmtMs(run.longTaskTotalMs, 1)} ms`,
       "count · total",
     ],
-    ["heapUsedMB", fmtMB(run.heapUsedMB), "main-thread JS heap (Chromium)"],
+    ["stepHalvings", fmtInt(run.stepHalvings), "final model fit (fitting_warnings)"],
+    [
+      "mainHeapUsedMB",
+      fmtMB(run.mainHeapUsedMB),
+      "main-thread JS heap only (Chromium); worker memory not included, do not compare across locations",
+    ],
     ["wasmMemoryMB", fmtMB(run.wasmMemoryMB), "wasm linear memory"]
   );
   if (saveMs !== null) rows.push(["saveMs", fmtMs(saveMs, 3), "writing the SPSS tables to the output store"]);

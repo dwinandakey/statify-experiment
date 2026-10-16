@@ -56,6 +56,16 @@ export function formatSpssTables(
 const finiteOrNaN = (v: unknown) => (typeof v === "number" ? v : NaN);
 
 /**
+ * Step-halving pada fit model akhir: `fitting_warnings.step_halving_count`
+ * (Rust irls::fit dan port JS). Objek itu hanya ada bila ada peringatan atau
+ * step-halving, jadi bila tidak ada nilainya 0.
+ */
+export function stepHalvingsFromResult(raw: unknown): number {
+  const warnings = (raw as { fitting_warnings?: { step_halving_count?: unknown } } | null)?.fitting_warnings;
+  return warnings ? finiteOrNaN(warnings.step_halving_count) : 0;
+}
+
+/**
  * B dan S.E. dari tabel Variables in the Equation hasil analisis lengkap,
  * urut sesuai featureNames (Constant, kovariat, dummy `nama(j)`), dicocokkan
  * lewat label seperti compareWithProduction; baris grup kategorik (tanpa B)
@@ -81,7 +91,7 @@ export function coefficientsFromResult(raw: unknown, featureNames: string[]): Co
     neg2ll: typeof ll === "number" ? -2 * ll : NaN,
     iterations: finiteOrNaN(result?.model_summary?.iterations),
     converged: result?.model_summary?.converged === true,
-    stepHalvings: null,
+    stepHalvings: stepHalvingsFromResult(raw),
     wasmCoreMs: null,
   };
 }

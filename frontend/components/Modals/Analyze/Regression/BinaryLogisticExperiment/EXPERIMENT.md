@@ -162,19 +162,22 @@ sehingga dataset N kecil adalah awalan (*prefix*) dari aliran indeks N besar.
 | Metrik | Definisi |
 |---|---|
 | `computeMs` | Waktu inti IRLS, diukur dengan `performance.now()` di konteks tempat inti dijalankan: main thread (A/C) atau di dalam worker (B/D), tepat mengapit pemanggilan inti. Untuk C/D ini mencakup penyalinan X dan y ke memori linear Wasm dan serialisasi hasil (lihat §8). |
-| `wasmCoreMs` | (Tambahan, C/D saja) durasi `irls_core` murni di dalam Wasm, diukur Rust via `performance.now()` yang diimpor; tanpa penyalinan input dan serialisasi hasil. |
+| `wasmCoreMs` | (Tambahan, C/D saja) durasi di dalam Wasm, diukur Rust via `performance.now()` yang diimpor; tanpa penyalinan input dan serialisasi hasil. Workload *core*: `irls_core` murni. Workload *full*: analisis Enter (parsing config, design matrix, seluruh statistik) dari `calculate_binary_logistic_timed` (§6, *Tombol OK*). |
+| `wasmSerializeMs` | (Workload *full*, C/D) `serde_json::to_string` atas hasil, di dalam Wasm. Sisa `computeMs − wasmCoreMs − wasmSerializeMs` = boundary JS↔Wasm (salin-masuk X/y, string JSON ke JS, `JSON.parse`). |
 | `e2eMs` | Diukur di main thread, dari tepat sebelum dispatch (setelah data siap dan disalin) sampai hasil tersedia di main thread. Worker: dari sebelum `postMessage` sampai awal handler `onmessage` (structured clone hasil sudah terjadi). Main: dispatch = pemanggilan fungsi, sehingga `e2eMs = computeMs`. |
 | `overheadMs` | `e2eMs − computeMs`: postMessage, transfer/clone, penjadwalan event loop, dan selisih jam antar konteks. Nol untuk mode main. |
 | `spawnMs` | Mode worker **cold**: dari `new Worker()` sampai pesan `ready` diterima di main thread, dikurangi `initMs`. Mencakup pembuatan thread, fetch + evaluasi modul worker (dan `irls_core.js`/glue wasm yang diimpor statis), serta round-trip pesan. |
 | `initMs` | Mode worker **cold**: inisialisasi di dalam worker. D: `await init()` (fetch, compile, instantiate `.wasm`); B: ≈ 0 karena tidak ada yang perlu di-init. Untuk worker **warm** keduanya dicatat sekali per batch (`warmSpawnMs*`, `warmInitMs*`). Untuk mode **main** dicatat sekali per page load (`mainJsImportMs`, `mainWasmImportMs`, `mainWasmInitMs`). |
 | `maxFrameGapMs` | Jarak maksimum antar callback `requestAnimationFrame` selama run, diukur dengan `performance.now()` **saat callback berjalan** (bukan argumen timestamp rAF, lihat §10). Monitor dimulai pada satu frame baseline sebelum dispatch dan dihentikan satu frame **setelah** hasil tersedia, agar gap yang memuat blocking ikut tercatat. |
-| `droppedFrames` | Jumlah gap rAF > 2 × 16,7 ms (33,4 ms). |
+| `droppedFrames` | Perkiraan jumlah **frame yang terlewat**: Σ max(0, round(gap / T) − 1) atas semua gap rAF di jendela run, T = `frameIntervalMs`. Satu gap 255 ms pada 60 Hz dihitung 14 frame, bukan 1. |
+| `longGapCount` | Jumlah **gap** rAF > 2T (jumlah gap, bukan jumlah frame). Ini definisi `droppedFrames` versi awal; dipertahankan untuk kesinambungan. |
+| `frameIntervalMs` | T: interval refresh layar, diukur sekali per sesi saat idle (median gap rAF; batch memakai `refreshIntervalMs` dari awal batch). Bila di luar 4–50 ms dipakai 1000/60 ms. |
 | `frameCount` | (Tambahan) jumlah callback rAF yang teramati selama run. |
 | `longTaskCount`, `longTaskTotalMs` | Entri `PerformanceObserver({ type: "longtask" })` (task main thread > 50 ms) yang tumpang-tindih dengan jendela run `[dispatch, frame setelah hasil]`. `null` bila browser tidak mendukung (hanya Chromium). |
-| `heapUsedMB` | `performance.memory.usedJSHeapSize` main thread setelah run (non-standar, Chromium; bernilai terkuantisasi). Heap worker tidak termasuk. |
+| `mainHeapUsedMB` | `performance.memory.usedJSHeapSize` **main thread** setelah run (non-standar, Chromium; terkuantisasi). `performance.memory` tidak tersedia di worker (dicek di Chrome 155), jadi memori worker B/D tidak terukur sama sekali: **jangan bandingkan metrik ini antarlokasi** (main vs worker). Untuk D, memori linear Wasm di worker terlihat di `wasmMemoryMB`. |
 | `wasmMemoryMB` | `memory.buffer.byteLength` Wasm setelah run (C: main thread, D: worker). Memori linear tidak pernah menyusut, jadi ini *high-water mark*. |
 | `pageHidden` | (Tambahan) `true` bila tab tersembunyi kapan pun selama run; rAF berhenti di tab latar, jadi metrik frame run tersebut tidak valid. |
-| `beta`, `se`, `neg2ll`, `iterations`, `converged`, `stepHalvings` | Hasil inti untuk validasi akurasi (kolom `B_<nama>`, `SE_<nama>` di CSV). Untuk workload *full*, B dan S.E. diambil dari tabel *Variables in the Equation* dan `stepHalvings` kosong. |
+| `beta`, `se`, `neg2ll`, `iterations`, `converged`, `stepHalvings` | Hasil inti untuk validasi akurasi (kolom `B_<nama>`, `SE_<nama>` di CSV). Untuk workload *full*, B dan S.E. diambil dari tabel *Variables in the Equation* dan `stepHalvings` dari `fitting_warnings.step_halving_count` fit model akhir (0 bila objek itu tidak ada), sama untuk port JS dan Rust. |
 | `workload` | `core` (inti IRLS) atau `full` (analisis lengkap + tabel SPSS, §6 *Batch workload Full analysis*). |
 | `formatMs` | (Workload *full*) formatter SPSS produksi di main thread setelah hasil tersedia, termasuk penambahan `model_info`; di dalam jendela ukur, di luar `e2eMs`. |
 | `totalMs` | (Workload *full*) dispatch → tabel SPSS selesai diformat, kira-kira `e2eMs + formatMs`: waktu sampai laporan siap ditulis. |
@@ -193,9 +196,14 @@ selisih positif terkecil antar pembacaan).
 Batch punya dua **workload** (pilihan *Workload* di bagian batch):
 
 - **IRLS core** (default): inti IRLS yang identik baris demi baris di JS dan
-  Rust, yaitu kontras 2×2 yang bersih untuk artikel.
+  Rust (loop biasa di atas array, Cholesky tulisan sendiri). Ini
+  **perbandingan runtime murni**: selisih JS vs Wasm berasal dari mesin
+  eksekusinya, bukan dari kode.
 - **Full analysis + SPSS tables**: pipeline tombol OK di setiap run (lihat
-  *Batch workload Full analysis* di bawah).
+  *Batch workload Full analysis* di bawah). Ini **skenario aplikasi nyata**,
+  tetapi membandingkan *implementasi* sekaligus runtime: A/B menjalankan port
+  JS dengan loop terfusi, C/D jalur produksi berbasis nalgebra (lihat
+  *Membaca core vs full*).
 
 Hasil batch terakhir per workload disimpan terpisah di dialog; keduanya ikut
 ditulis tombol OK. Prosedur berikut sama untuk kedua workload. Untuk setiap
@@ -237,6 +245,31 @@ Total run = |N| × (W + R) × 4. Ringkasan per (N, mode): median, IQR (Q1–Q3,
 kuantil tipe 7 seperti default R/NumPy), min, dan max untuk `computeMs`,
 `e2eMs`, dan `maxFrameGapMs` (workload *full*: juga `formatMs` dan `totalMs`),
 plus chart median dengan whisker IQR.
+
+### Membaca core vs full
+
+Jalur produksi Rust (`stats/irls.rs`, `fit`) di setiap iterasi IRLS membuat
+dua salinan transpose X (`x.transpose() * &residuals` untuk gradien dan
+`let mut xt_w = x.transpose()` untuk XᵀWX; masing-masing p×n, ±9,6 MB pada
+N = 100.000, p = 12), lalu perkalian matriks generik nalgebra, dan mengecek
+condition number Hessian dengan SVD (`estimate_condition_number`). Hasilnya
+diserialisasi ke JSON. Port JS menghitung gradien dan XᵀWX langsung dalam satu
+lintasan per baris tanpa salinan, dan condition number dari eigen Jacobi.
+Salinan transpose dan perkalian matriks berskala n·p, jadi ikut menentukan
+**biaya per baris**; SVD p×p dan serialisasi JSON tidak bergantung pada N.
+
+Karena itu jalankan **kedua workload dengan pengaturan dan dataset yang sama**
+(runner otomatis: §9) dan bandingkan biaya per baris (slope `computeMs` ~ N)
+dan rasio Wasm/JS per lokasi (`scripts/compareWorkloads.mjs`):
+
+- Wasm tetap unggul di *core* pada N besar, tetapi tidak di *full* → biaya
+  tambahan di *full* berasal dari implementasi (jalur nalgebra), bukan dari
+  runtime Wasm.
+- Wasm juga tidak unggul di *core* → V8 memang setara untuk beban ini.
+
+Keduanya dilaporkan: *core* untuk perbandingan runtime murni, *full* untuk
+skenario aplikasi nyata. Pada C/D, `wasmCoreMs` dan `wasmSerializeMs` memisahkan
+analisis di dalam Wasm dari serialisasi dan boundary JS↔Wasm.
 
 ### Penyajian hasil: dialog vs output viewer
 
@@ -283,11 +316,18 @@ omnibus test, pseudo-R², classification table, Wald, dan CI, sehingga tombol OK
 |---|---|---|
 | A | `logistic_enter.js` → `calculateBinaryLogistic` | main thread (`import()`) |
 | B | `logistic_enter.js` → `calculateBinaryLogistic` | `jsCore.worker.js` (pesan `init_full` / `run_full`) |
-| C | `calculate_binary_logistic` dari `pkg/` eksperimen + `JSON.parse` | main thread |
-| D | `calculate_binary_logistic` dari `pkg/` eksperimen + `JSON.parse` | `wasmCore.worker.js` (pesan `init_full` / `run_full`) |
+| C | `calculate_binary_logistic_timed` dari `pkg/` eksperimen + `JSON.parse` | main thread |
+| D | `calculate_binary_logistic_timed` dari `pkg/` eksperimen + `JSON.parse` | `wasmCore.worker.js` (pesan `init_full` / `run_full`) |
 
-- `calculate_binary_logistic` di paket eksperimen adalah kode Rust produksi
-  yang sama (crate yang sama dikompilasi ulang), jadi C/D = analisis produksi.
+- `calculate_binary_logistic_timed` (`rust/src/bench/enter_timed.rs`, modul
+  baru) memanggil fungsi internal produksi yang sama dengan
+  `calculate_binary_logistic` (`design_matrix::build`, `strategies::enter::run`,
+  `serde_json::to_string`) dengan validasi dan pesan error yang sama, jadi
+  C/D = analisis produksi. Bedanya hanya pencatatan waktu di dalam Wasm
+  (analisis vs serialisasi), dibaca setelah timer JS berhenti lewat
+  `last_full_timings()`. String JSON-nya identik byte demi byte dengan
+  `calculate_binary_logistic` (dicek `checkEnterParity.mjs` pada 7 dataset);
+  fungsi produksi tidak diubah.
 - `logistic_enter.js` adalah port JavaScript baris demi baris dari jalur
   Enter produksi: `design_matrix::build` (Indicator, referensi Last), Block 0
   (model konstanta, score test per variabel/grup, global), `irls::fit` lengkap
@@ -319,10 +359,12 @@ Metrik pada kartu *Analysis run (OK)*:
 | Metrik | Definisi |
 |---|---|
 | `computeMs` | Analisis lengkap, diukur di konteks tempat mesin berjalan. C/D mencakup penyalinan input ke memori Wasm, serialisasi `serde_json` di Rust, dan `JSON.parse` di JS (string JSON adalah antarmuka produksi). A/B mengembalikan objek JS langsung. |
+| `wasmCoreMs`, `wasmSerializeMs` | (C/D) analisis dan serialisasi JSON di dalam Wasm; lihat §5. |
+| `stepHalvings` | Step-halving fit model akhir (`fitting_warnings.step_halving_count`, 0 bila tidak ada). |
 | `e2eMs`, `overheadMs` | Seperti §5; untuk B/D `overheadMs` memuat structured clone objek hasil lengkap (jauh lebih besar daripada hasil inti). |
 | `engineInitMs` | Pemuatan mesin sebelum timer: `import()` `logistic_enter.js` (A, B di dalam worker) atau `init()` wasm (C, D). ≈ 0 bila sudah dimuat sebelumnya di halaman/worker itu. |
 | `spawnMs`, `initMs` | Hanya bila run OK ini membuat worker baru (cold, atau worker warm pertama di dialog). |
-| `maxFrameGapMs`, `droppedFrames`, `longTasks`, `heapUsedMB`, `wasmMemoryMB` | Seperti §5. |
+| `maxFrameGapMs`, `droppedFrames`, `longGapCount`, `longTasks`, `mainHeapUsedMB`, `wasmMemoryMB` | Seperti §5 (`mainHeapUsedMB` hanya main thread; jangan dibandingkan antarlokasi). |
 | `formatMs` | `formatBinaryLogisticResult` produksi di main thread (sama untuk keempat mode); di dalam jendela ukur, di luar `e2eMs`. |
 | `totalMs` | Dispatch → tabel SPSS selesai diformat. |
 | `saveMs` | Penulisan tabel SPSS ke store hasil (IndexedDB), di luar jendela ukur; tidak ada bila tabel SPSS tidak ditulis. |
@@ -355,7 +397,8 @@ Worker warm memuat mesinnya sekali sebelum batch (`warmEngineInitMsB/D` di
 CSV). Klik **OK** setelah batch untuk menulis ringkasan dan akurasinya ke
 kartu eksperimen; data per run tetap lewat **Download CSV**. Waktu workload
 *full* membandingkan port JS dengan kode Rust produksi, jadi bukan kontras
-teknologi yang bersih (lihat §10).
+teknologi yang bersih: laporkan bersama batch *core* dengan pengaturan yang
+sama (lihat *Membaca core vs full* dan §10).
 
 ## 7. Validasi akurasi
 
@@ -366,7 +409,8 @@ teknologi yang bersih (lihat §10).
 | Biner wasm | Golden values via Node (`initSync`) | identik bit-per-bit (Δ = 0) |
 | Antar mode (UI) | Per N: max \|Δβ\| dan max \|ΔSE\| tiap mode terhadap run pertama mode D, atas semua ulangan | kriteria < 1e-8 |
 | Terhadap produksi (UI) | Tombol *Compare with production*: `calculate_binary_logistic` (Enter, opsi default, kategorik Indicator/Last) lewat worker produksi pada data N asli; baris "Constant" ↔ kolom intercept, kovariat dan dummy (`nama(j)`) dicocokkan lewat nama, baris omnibus grup kategorik dilewati | kriteria < 1e-4 |
-| Port JS analisis lengkap | `scripts/checkEnterParity.mjs` (juga dijalankan Jest lewat `logisticEnterParity.experiment.test.js`): seluruh objek hasil `logistic_enter.js` vs `calculate_binary_logistic` Rust (paket eksperimen via `initSync`) pada 7 dataset: numerik, kategorik, step-halving + separasi, hampir separasi, kolinear sempurna, kolom nol, kategorik kecil. Semua field dibandingkan, termasuk pesan peringatan | lulus; selisih berskala maks 7,3e-14 (kriteria \|Δ\| ≤ 1e-8 · max(1, \|a\|, \|b\|)) |
+| Port JS analisis lengkap | `scripts/checkEnterParity.mjs` (juga dijalankan Jest lewat `logisticEnterParity.experiment.test.js`): seluruh objek hasil `logistic_enter.js` vs `calculate_binary_logistic` Rust (paket eksperimen via `initSync`) pada 7 dataset: numerik, kategorik, step-halving + separasi, hampir separasi, kolinear sempurna, kolom nol, kategorik kecil. Semua field dibandingkan, termasuk pesan peringatan. Skrip yang sama memastikan string JSON `calculate_binary_logistic_timed` identik dengan `calculate_binary_logistic` | lulus; selisih berskala maks 7,3e-14 (kriteria \|Δ\| ≤ 1e-8 · max(1, \|a\|, \|b\|)); JSON ekspor ber-timer identik di 7 dataset |
+| Ekspor ber-timer (Rust) | `cargo test`: `bench::enter_timed` (JSON lengkap, waktu dari jam palsu, determinisme, validasi dan pesan error sama dengan produksi) | lulus (38 test crate) |
 | Batch analisis lengkap (UI) | Per N: hash tabel SPSS tiap run vs run pertama mode D, plus selisih berskala B/S.E. dari *Variables in the Equation* | kriteria: semua tabel identik dan selisih berskala < 1e-8 |
 | Pipeline tabel SPSS (Jest) | `binaryLogisticExperiment.spssFormat.test.ts`: `logistic_enter.js` + formatter produksi pada data sintetis kategorik; ekstraksi B/S.E. vs `irlsCore` pada design matrix yang sama; hash deterministik; `toProductionPayload` | lulus; B/S.E. selisih < 1e-8 terhadap inti IRLS |
 | Output viewer (E2E) | Tombol OK di keempat konfigurasi (D, A, B, C) pada dialog yang sama vs dialog Binary Logistic produksi untuk data dan variabel yang sama; batch *full* kecil; OK tanpa tabel SPSS; Close lalu buka lagi | header komponen, isi tabel, dan sintaks identik untuk keempat mode; tabel batch *full* identik di semua run; state dialog tetap ada |
@@ -395,8 +439,10 @@ di crate `BinaryLogistic/rust` (profil release default: `opt-level = 3`, tanpa
 LTO, lalu `wasm-opt -O`), kemudian menyalin `statify_logistic*` ke
 `public/workers/Regression/BinaryExperiment/pkg/`. `rust/pkg` dan
 `public/workers/Regression/Binary/pkg` produksi tidak disentuh. Paket
-eksperimen memuat seluruh crate (termasuk fungsi produksi), sehingga ukuran
-`.wasm` (~755 KB) dan biaya `init()` sebanding dengan paket produksi.
+eksperimen memuat seluruh crate (termasuk fungsi produksi) plus modul `bench`
+(`irls_core_bench`, `calculate_binary_logistic_timed`, `last_full_timings`),
+sehingga ukuran `.wasm` (~763 KB) dan biaya `init()` sebanding dengan paket
+produksi.
 
 Unit test:
 
@@ -444,10 +490,27 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
 6. Biarkan tab **tetap terlihat** dan jangan berinteraksi selama batch: rAF
    berhenti di tab latar (run seperti ini ditandai `pageHidden = true`).
 7. Pengaturan baku: warm-up 5, ulangan 30, seed dicatat, ukuran N asli +
-   10.000 + 50.000 + 100.000, workload *IRLS core*. Ulangi batch dengan opsi
-   *cold* bila ingin mengukur biaya pembuatan worker, dan dengan workload
-   *Full analysis + SPSS tables* bila ingin mengukur pipeline tombol OK
-   (analisis lengkap + tabel SPSS) secara berulang.
+   10.000 + 50.000 + 100.000. Jalankan **kedua workload** (*IRLS core* dan
+   *Full analysis + SPSS tables*) dengan pengaturan dan dataset yang sama;
+   pengaturan batch di dialog dipakai bersama oleh kedua workload, jadi cukup
+   ganti *Workload* lalu *Run batch* lagi. Ulangi dengan opsi *cold* bila ingin
+   mengukur biaya pembuatan worker.
+
+   Runner otomatis (core lalu full di sesi browser yang sama, CSV + meta.json
+   disimpan; dari root repo setelah production build):
+
+   ```powershell
+   $env:EXPERIMENT_BENCH_DATA = "C:\data\dataset.csv"
+   $env:EXPERIMENT_BENCH_CHANNEL = "chrome"   # Chrome terpasang, bukan Chromium Playwright
+   $env:EXPERIMENT_BENCH_DEPENDENT = "Attrition"
+   $env:EXPERIMENT_BENCH_COVARIATES = "Age,BusinessTravel,DistanceFromHome,MaritalStatus,MonthlyIncome,MonthlyRate,OverTime,TotalWorkingYears,YearsAtCompany"
+   $env:EXPERIMENT_PORT = "3002"
+   npx playwright test -c tests/experiment/playwright.experiment.config.ts benchmark-workloads
+   node frontend/components/Modals/Analyze/Regression/BinaryLogisticExperiment/scripts/compareWorkloads.mjs benchmark-results/batch-*.csv
+   ```
+
+   Runner berjalan headless; untuk artikel tetap catat versi browser dan
+   bandingkan dengan batch dari jendela browser biasa.
 8. Unduh **CSV** (satu baris per run) dan **meta.json** setelah setiap batch.
    Pastikan tabel akurasi lulus (< 1e-8; workload *full*: semua tabel SPSS
    identik) dan *Compare with production* lulus (< 1e-4).
@@ -492,11 +555,17 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
   di Chromium nilainya adalah waktu BeginFrame yang selaras vsync dan bisa
   terbit saat main thread masih macet, sehingga gap terkuantisasi ke kelipatan
   16,7 ms dan meremehkan freeze (uji awal: inti 62 ms → gap timestamp 50,0 ms).
-  Ambang frame drop tetap 2 × 16,7 ms walau layar 90/120 Hz (lihat
-  `refreshIntervalMs`). Untuk mode main, `maxFrameGapMs` ≳ `computeMs` karena
-  callback berikutnya baru bisa berjalan setelah inti selesai.
-- **`performance.memory`** non-standar, terkuantisasi, dan hanya mencakup heap
-  JS main thread; heap worker tidak terukur.
+  `droppedFrames` memakai interval refresh terukur T (`frameIntervalMs`), jadi
+  layar 90/120 Hz menghasilkan lebih banyak frame terlewat untuk freeze yang
+  sama; bandingkan antar mode pada mesin dan layar yang sama. Untuk mode main,
+  `maxFrameGapMs` ≳ `computeMs` karena callback berikutnya baru bisa berjalan
+  setelah inti selesai.
+- **`performance.memory`** non-standar, terkuantisasi, dan hanya ada di main
+  thread (tidak tersedia di worker; `measureUserAgentSpecificMemory` juga tidak
+  ada di worker). `mainHeapUsedMB` mode B/D tidak memuat memori worker, jadi
+  metrik memori **tidak bisa dibandingkan antarlokasi**; perbandingan memori
+  yang sah hanya antarteknologi pada lokasi yang sama (A vs C), ditambah
+  `wasmMemoryMB` untuk C/D.
 - **Non-determinisme runtime.** GC, tier-up JIT, throttling thermal, dan
   penjadwalan OS menambah varians. Pengacakan urutan per ulangan mengurangi
   bias sistematis antar mode, tetapi ukuran N dijalankan berurutan (naik), jadi
@@ -504,15 +573,17 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
 - **Resampling dengan pengembalian** mempertahankan distribusi data asli tetapi
   menghasilkan baris duplikat; jumlah iterasi IRLS bisa berbeda antar N
   (tercatat di kolom `iterations`).
-- **Waktu tombol OK bukan kontras bersih.** Pada OK, A/B menjalankan port JS
-  dan C/D kode Rust produksi. Algoritma dan urutan langkahnya sama dan hasilnya
-  identik hingga pembulatan, tetapi implementasi aljabar liniernya tidak
-  identik baris demi baris seperti `irls_core` (mis. condition number: eigen
-  Jacobi Hessian di JS vs SVD nalgebra di Rust; nalgebra juga memakai struktur
-  data dan alokasi sendiri). C/D juga membayar serialisasi JSON dua arah
-  (`serde_json` → string → `JSON.parse`), sedangkan A/B tidak. Karena itu
-  selisih waktu OK mencampur efek runtime dengan efek implementasi; kontras
-  teknologi × lokasi yang bersih tetap berasal dari Run once/batch.
+- **Workload *full* dan tombol OK bukan kontras runtime bersih.** A/B
+  menjalankan port JS dan C/D kode Rust produksi. Algoritma dan urutan
+  langkahnya sama dan hasilnya identik hingga pembulatan, tetapi
+  implementasinya tidak: jalur produksi menyalin `x.transpose()` dua kali per
+  iterasi IRLS, memakai perkalian matriks generik nalgebra dan SVD untuk
+  condition number, lalu menserialisasi hasil ke JSON (dan JS memanggil
+  `JSON.parse`), sedangkan port JS memakai loop terfusi tanpa salinan dan
+  mengembalikan objek langsung. Selisih waktu *full* mencampur efek runtime
+  dengan efek implementasi; kontras teknologi × lokasi yang bersih berasal dari
+  workload *core*, dan `wasmCoreMs`/`wasmSerializeMs` membantu memilah biaya
+  di dalam Wasm.
 - **Validitas eksternal.** Hasil berlaku untuk satu browser/mesin per batch;
   mesin JS dan Wasm lain (SpiderMonkey, JavaScriptCore) dapat berperilaku
   berbeda. Inti eksperimen sengaja lebih sederhana dari `irls::fit` produksi

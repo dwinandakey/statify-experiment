@@ -10,6 +10,7 @@ import {
   formatSpssTables,
   hashText,
   spssTablesHash,
+  stepHalvingsFromResult,
   toProductionPayload,
 } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/spssFormat";
 import { mulberry32 } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/prng";
@@ -87,7 +88,7 @@ describe("coefficientsFromResult", () => {
     expect(c.beta.every(Number.isFinite)).toBe(true);
     expect(c.se.every((v) => v > 0)).toBe(true);
     expect(c.converged).toBe(true);
-    expect(c.stepHalvings).toBeNull();
+    expect(c.stepHalvings).toBe(stepHalvingsFromResult(raw));
     expect(c.neg2ll).toBeGreaterThan(0);
   });
 
@@ -114,6 +115,20 @@ describe("coefficientsFromResult", () => {
     expect(c.se).toEqual([NaN, 0.2, NaN]);
     expect(c.neg2ll).toBe(100);
     expect(c.iterations).toBe(4);
+  });
+});
+
+describe("stepHalvingsFromResult", () => {
+  test("dari fitting_warnings.step_halving_count; tanpa fitting_warnings berarti 0", () => {
+    expect(stepHalvingsFromResult({ fitting_warnings: { step_halving_count: 3, messages: [] } })).toBe(3);
+    expect(stepHalvingsFromResult({ model_summary: {} })).toBe(0);
+    expect(stepHalvingsFromResult({ fitting_warnings: {} })).toBeNaN();
+  });
+
+  test("sama dengan jumlah step-halving inti IRLS pada data yang sama", () => {
+    const { prep, raw } = run(makeData(300, 5));
+    const core = irlsCore(prep.X, prep.y, prep.n, prep.p);
+    expect(stepHalvingsFromResult(raw)).toBe(core.stepHalvings);
   });
 });
 

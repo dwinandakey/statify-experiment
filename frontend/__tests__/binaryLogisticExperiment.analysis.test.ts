@@ -43,11 +43,14 @@ function rec(mode: ExperimentMode, N: number, e2eMs: number, beta: number[], ext
     tablesHash: null,
     maxFrameGapMs: 16.7,
     droppedFrames: 0,
+    longGapCount: 0,
     frameCount: 3,
+    frameIntervalMs: 16.7,
     longTaskCount: 0,
     longTaskTotalMs: 0,
-    heapUsedMB: null,
+    mainHeapUsedMB: null,
     wasmMemoryMB: null,
+    wasmSerializeMs: null,
     pageHidden: false,
     result: { beta, se: beta.map((b) => Math.abs(b) / 10), neg2ll: 100, iterations: 4, converged: true, stepHalvings: 0, wasmCoreMs: null },
     error: null,
@@ -78,11 +81,26 @@ describe("quantile / summarize (tipe 7, sama dengan R quantile default)", () => 
 });
 
 describe("computeFrameStats", () => {
-  test("gap maksimum dan frame drop (> 2 × 16,7 ms)", () => {
-    const s = computeFrameStats([0, 16.7, 33.4, 150, 166.7, 210]);
+  test("droppedFrames = frame yang terlewat, longGapCount = jumlah gap > 2T", () => {
+    const s = computeFrameStats([0, 16.7, 33.4, 150, 166.7, 210], 16.7);
     expect(s.maxFrameGapMs).toBeCloseTo(116.6, 9);
-    expect(s.droppedFrames).toBe(2); // 116,6 dan 43,3
+    // 116,6 ms ≈ 7 interval → 6 frame terlewat; 43,3 ms ≈ 3 interval → 2 frame terlewat
+    expect(s.droppedFrames).toBe(8);
+    expect(s.longGapCount).toBe(2);
     expect(s.frameCount).toBe(6);
+    expect(s.frameIntervalMs).toBe(16.7);
+  });
+
+  test("satu gap 255 ms pada 60 Hz = 14 frame terlewat, bukan 1", () => {
+    const s = computeFrameStats([0, 255]);
+    expect(s.frameIntervalMs).toBeCloseTo(1000 / 60, 12);
+    expect(s.droppedFrames).toBe(14);
+    expect(s.longGapCount).toBe(1);
+  });
+
+  test("jitter di sekitar satu interval tidak dihitung; layar 120 Hz memakai T-nya sendiri", () => {
+    expect(computeFrameStats([0, 17.9, 33.0, 51.2], 16.67).droppedFrames).toBe(0);
+    expect(computeFrameStats([0, 50], 8.33).droppedFrames).toBe(5);
   });
 
   test("kurang dari dua frame → gap NaN", () => {
@@ -134,6 +152,14 @@ describe("computeSummaries & computeAccuracy", () => {
   test("workload core: formatMs/totalMs kosong, tanpa uji tabel", () => {
     expect(computeSummaries(records)[0].totalMs).toBeNull();
     expect(computeAccuracy(records)[0].tablesIdentical).toBeNull();
+  });
+
+  test("wasmCoreMs diringkas hanya untuk run yang memilikinya (C/D)", () => {
+    const withCore = (mode: ExperimentMode, ms: number) =>
+      rec(mode, 100, 10, [0.5, 1.2], { result: { beta: [0.5, 1.2], se: [0.05, 0.12], neg2ll: 1, iterations: 4, converged: true, stepHalvings: 0, wasmCoreMs: ms } });
+    const s = computeSummaries([withCore("C", 3), withCore("C", 5), rec("A", 100, 10, [0.5, 1.2])]);
+    expect(s.find((x) => x.mode === "C")!.wasmCoreMs!.median).toBe(4);
+    expect(s.find((x) => x.mode === "A")!.wasmCoreMs).toBeNull();
   });
 });
 
@@ -221,6 +247,8 @@ describe("CSV", () => {
     expect(lines[2].split(",")[header.indexOf("error")]).toBe("x");
     expect(lines[1].split(",")[header.indexOf("workload")]).toBe("core");
     expect(lines[1].split(",")[header.indexOf("totalMs")]).toBe("");
+    expect(header).toEqual(expect.arrayContaining(["longGapCount", "frameIntervalMs", "mainHeapUsedMB", "wasmSerializeMs"]));
+    expect(header).not.toContain("heapUsedMB");
   });
 
   test("workload full: formatMs, totalMs, dan kesamaan tabel SPSS terhadap run D pertama per N", () => {

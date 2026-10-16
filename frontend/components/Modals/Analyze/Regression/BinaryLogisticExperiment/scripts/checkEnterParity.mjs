@@ -2,6 +2,8 @@
 // calculate_binary_logistic Rust (paket wasm eksperimen, mode C/D) untuk
 // metode Enter dengan opsi default. Seluruh objek hasil dibandingkan:
 // struktur & string harus sama persis, angka cocok hingga toleransi relatif.
+// Juga memastikan calculate_binary_logistic_timed (mode C/D workload full)
+// mengembalikan string JSON yang identik dengan calculate_binary_logistic.
 //
 // Jalankan dari folder frontend (Node >= 22):
 //   node components/Modals/Analyze/Regression/BinaryLogisticExperiment/scripts/checkEnterParity.mjs
@@ -198,9 +200,15 @@ let failures = 0;
 for (const d of datasets) {
   const fn = JSON.stringify(d.featureNames);
   const js = calculateBinaryLogistic(d.x, d.n, d.cols, d.y, d.config, fn);
-  const rust = JSON.parse(wasm.calculate_binary_logistic(d.x, d.n, d.cols, d.y, d.config, fn));
+  const rustJson = wasm.calculate_binary_logistic(d.x, d.n, d.cols, d.y, d.config, fn);
+  const rust = JSON.parse(rustJson);
   const diffs = [];
   compare(js, rust, "result", diffs);
+  // Ekspor ber-timer (mode C/D workload full) harus menghasilkan string JSON yang identik
+  const timedJson = wasm.calculate_binary_logistic_timed(d.x, d.n, d.cols, d.y, d.config, fn);
+  const [analysisMs, serializeMs] = wasm.last_full_timings();
+  if (timedJson !== rustJson) diffs.push("calculate_binary_logistic_timed: JSON differs from calculate_binary_logistic");
+  if (!(analysisMs >= 0 && serializeMs >= 0)) diffs.push(`last_full_timings: invalid [${analysisMs}, ${serializeMs}]`);
   const warn = rust.fitting_warnings ? ` warnings=${rust.fitting_warnings.messages.length}` : "";
   if (diffs.length === 0) {
     const { abs, scaled } = maxDiffs(js, rust);

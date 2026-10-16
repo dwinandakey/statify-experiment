@@ -4,13 +4,23 @@
  */
 import type { EnvironmentMeta, SummaryStats } from "../types/experiment";
 
-/** Ambang "frame drop" sesuai spesifikasi: gap rAF > 2 × 16,7 ms. */
-export const DROPPED_FRAME_THRESHOLD_MS = 2 * 16.7;
+/** Interval frame nominal 60 Hz; cadangan bila interval refresh tidak bisa diukur. */
+export const NOMINAL_FRAME_MS = 1000 / 60;
+
+/** Interval refresh terukur yang masuk akal (4–50 ms); selain itu nominal 60 Hz. */
+export function sanitizeFrameInterval(ms: number | null | undefined): number {
+  return typeof ms === "number" && Number.isFinite(ms) && ms >= 4 && ms <= 50 ? ms : NOMINAL_FRAME_MS;
+}
 
 export interface FrameStats {
   maxFrameGapMs: number;
+  /** Perkiraan frame yang terlewat: Σ max(0, round(gap / T) − 1). Gap 255 ms pada 60 Hz → 14. */
   droppedFrames: number;
+  /** Jumlah gap > 2T (jumlah gap, bukan jumlah frame; definisi droppedFrames versi awal). */
+  longGapCount: number;
   frameCount: number;
+  /** T: interval refresh yang dipakai untuk droppedFrames dan longGapCount. */
+  frameIntervalMs: number;
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -68,6 +78,8 @@ export async function interRunPause(): Promise<void> {
  * meremehkan freeze (teramati: inti 62 ms → gap timestamp 50,0 ms).
  */
 export class FrameMonitor {
+  /** T untuk droppedFrames; diisi sesi dari interval refresh terukur. */
+  frameIntervalMs = NOMINAL_FRAME_MS;
   private stamps: number[] = [];
   private handle: number | null = null;
   private running = false;
@@ -103,7 +115,7 @@ export class FrameMonitor {
       const finish = () => {
         clearTimeout(timer);
         this.cancel();
-        resolve(computeFrameStats(this.stamps));
+        resolve(computeFrameStats(this.stamps, this.frameIntervalMs));
       };
       const timer = setTimeout(() => {
         this.onNextFrame = null;
@@ -121,18 +133,23 @@ export class FrameMonitor {
   }
 }
 
-export function computeFrameStats(stamps: number[]): FrameStats {
+export function computeFrameStats(stamps: number[], frameIntervalMs = NOMINAL_FRAME_MS): FrameStats {
   let maxGap = 0;
   let dropped = 0;
+  let longGaps = 0;
   for (let i = 1; i < stamps.length; i++) {
     const gap = stamps[i] - stamps[i - 1];
     if (gap > maxGap) maxGap = gap;
-    if (gap > DROPPED_FRAME_THRESHOLD_MS) dropped++;
+    // Frame yang seharusnya tampil di antara dua callback rAF tetapi terlewat
+    dropped += Math.max(0, Math.round(gap / frameIntervalMs) - 1);
+    if (gap > 2 * frameIntervalMs) longGaps++;
   }
   return {
     maxFrameGapMs: stamps.length > 1 ? maxGap : NaN,
     droppedFrames: dropped,
+    longGapCount: longGaps,
     frameCount: stamps.length,
+    frameIntervalMs,
   };
 }
 
@@ -190,8 +207,11 @@ export class LongTaskCollector {
 
 const MB = 1024 * 1024;
 
-/** performance.memory.usedJSHeapSize (non-standar, Chromium); null bila tidak ada. */
-export function heapUsedMB(): number | null {
+/**
+ * performance.memory.usedJSHeapSize main thread (non-standar, Chromium); null
+ * bila tidak ada. Tidak tersedia di worker, jadi heap worker tidak terukur.
+ */
+export function mainHeapUsedMB(): number | null {
   const mem = (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory;
   return mem && typeof mem.usedJSHeapSize === "number" ? mem.usedJSHeapSize / MB : null;
 }
@@ -269,7 +289,7 @@ export async function captureEnvironment(): Promise<EnvironmentMeta> {
     refreshIntervalMs: await estimateRefreshInterval(),
     timerResolutionMs: estimateTimerResolution(),
     longTaskSupported: new LongTaskCollector().supported,
-    memoryApiSupported: heapUsedMB() !== null,
+    memoryApiSupported: mainHeapUsedMB() !== null,
     capturedAt: new Date().toISOString(),
   };
 }

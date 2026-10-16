@@ -259,7 +259,7 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, core + full 
   const csv = fs.readFileSync((await csvDownload.path())!, "utf8").trim().split(/\r?\n/).map(parseCsvLine);
   const header = csv[0];
   expect(csv).toHaveLength(1 + 2 * 2 * 4);
-  for (const col of ["mode", "N", "computeMs", "e2eMs", "overheadMs", "maxFrameGapMs", "droppedFrames", "longTaskCount", "B_Constant", "B_grp(1)", "SE_grp(2)", "userAgent", "hardwareConcurrency", "crossOriginIsolated", "buildMode", "gitCommit"]) {
+  for (const col of ["mode", "N", "computeMs", "e2eMs", "overheadMs", "maxFrameGapMs", "droppedFrames", "longGapCount", "frameIntervalMs", "longTaskCount", "mainHeapUsedMB", "wasmCoreMs", "B_Constant", "B_grp(1)", "SE_grp(2)", "userAgent", "hardwareConcurrency", "crossOriginIsolated", "buildMode", "gitCommit"]) {
     expect(header).toContain(col);
   }
   const col = (row: string[], name: string) => row[header.indexOf(name)];
@@ -308,6 +308,16 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, core + full 
     expect(fullCol(row, "tablesIdenticalToD")).toBe("true");
     expect(Number(fullCol(row, "formatMs"))).toBeGreaterThan(0);
     expect(Number(fullCol(row, "totalMs"))).toBeGreaterThanOrEqual(Number(fullCol(row, "e2eMs")));
+    expect(fullCol(row, "stepHalvings")).toMatch(/^\d+$/);
+    const wasm = ["C", "D"].includes(fullCol(row, "mode"));
+    // Waktu di dalam Wasm hanya untuk C/D, dan selalu lebih kecil dari computeMs
+    expect(fullCol(row, "wasmCoreMs") !== "").toBe(wasm);
+    if (wasm) {
+      expect(Number(fullCol(row, "wasmCoreMs"))).toBeGreaterThan(0);
+      expect(Number(fullCol(row, "wasmCoreMs")) + Number(fullCol(row, "wasmSerializeMs"))).toBeLessThanOrEqual(
+        Number(fullCol(row, "computeMs"))
+      );
+    }
   }
 
   // Hasil batch inti IRLS tetap tersimpan saat workload dipindah lagi
