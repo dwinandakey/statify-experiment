@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod models;
 pub mod stats;
 pub mod strategies;
@@ -239,4 +240,26 @@ pub fn calculate_box_tidwell(
         }
         Err(e) => Err(api_error(&e)),
     }
+}
+
+// 4. BENCHMARK EKSPERIMEN 2×2 (inti IRLS tanpa nalgebra, lihat bench/irls_core.rs)
+// Hanya dipakai menu "Binary Logistic (Experiment)". Hasil dikembalikan sebagai
+// objek JS {beta, se, neg2ll, iterations, converged, stepHalvings, coreMs}
+// lewat serde_wasm_bindgen; coreMs = durasi irls_core murni di dalam Wasm.
+#[wasm_bindgen]
+pub fn irls_core_bench(
+    data_x: &[f64],
+    n: usize,
+    p: usize,
+    data_y: &[f64],
+    max_iter: usize,
+    tol: f64,
+) -> Result<JsValue, JsValue> {
+    let t0 = bench::now_ms();
+    let result = bench::irls_core::irls_core(data_x, data_y, n, p, max_iter, tol)
+        .map_err(|e| api_error(&e))?;
+    let core_ms = bench::now_ms() - t0;
+
+    serde_wasm_bindgen::to_value(&bench::BenchOutput::new(result, core_ms))
+        .map_err(|e| api_error(&format!("Gagal serialize hasil benchmark: {}", e)))
 }
