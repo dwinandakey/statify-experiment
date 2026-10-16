@@ -79,7 +79,7 @@ describe("prepareExperimentData", () => {
   });
 
   test("kovariat nominal/ordinal/string ditolak dengan pesan jelas", () => {
-    expect(() => prepareExperimentData(data, vars, vars[0], [vars[1], vars[3]])).toThrow(/rank.*ordinal.*numeric \(scale\) covariates only/s);
+    expect(() => prepareExperimentData(data, vars, vars[0], [vars[1], vars[3]])).toThrow(/rank[\s\S]*ordinal[\s\S]*numeric \(scale\) covariates only/);
     expect(() => prepareExperimentData(data, vars, vars[0], [vars[4]])).toThrow(/string variable/);
   });
 
