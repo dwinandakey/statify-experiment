@@ -72,9 +72,18 @@ test("benchmark: core and full workloads with identical settings", async ({ brow
   test.skip(!DATA, "Set EXPERIMENT_BENCH_DATA to run the workload benchmark.");
   test.setTimeout(90 * 60_000);
   fs.mkdirSync(OUT, { recursive: true });
-  // Context sendiri tanpa userAgent dari device descriptor proyek, supaya kolom
-  // userAgent di CSV/meta adalah browser yang benar-benar dipakai
-  const context = await browser.newContext({ baseURL, acceptDownloads: true, viewport: { width: 1600, height: 1000 } });
+  // Playwright Test menerapkan userAgent device descriptor proyek ("Desktop Chrome",
+  // string Chromium bawaan) juga ke context manual; pakai UA asli dari CDP supaya
+  // kolom userAgent di CSV/meta adalah browser yang benar-benar dipakai
+  const cdp = await browser.newBrowserCDPSession();
+  const { userAgent: realUserAgent } = (await cdp.send("Browser.getVersion")) as { userAgent: string };
+  await cdp.detach();
+  const context = await browser.newContext({
+    baseURL,
+    acceptDownloads: true,
+    viewport: { width: 1600, height: 1000 },
+    userAgent: realUserAgent,
+  });
   const page = await context.newPage();
   const userAgent = await page.evaluate(() => navigator.userAgent);
   fs.writeFileSync(path.join(OUT, "browser.txt"), `browser.version() = ${browser.version()}\nuserAgent = ${userAgent}\n`);
