@@ -333,11 +333,22 @@ export function ExperimentTab({ dependent, covariates, active, onBusyChange, onR
             ) · Covariates {prepared.value.covariates.map((c) => c.name).join(", ")} · N ={" "}
             <strong data-testid="bl-exp-n-original">{fmtInt(prepared.value.n)}</strong> after listwise deletion (
             {fmtInt(prepared.value.nMissing)} dropped) · p = {prepared.value.p} incl. constant · Method: Enter
+            {prepared.value.categoricalCodings.map((c) => (
+              <span key={c.variable} className="mt-1 block text-muted-foreground" data-testid={`bl-exp-coding-${c.variable}`}>
+                {c.variable} (Indicator):{" "}
+                {c.categories.map((cat, i) => (i === c.categories.length - 1 ? `${cat.label} (reference)` : cat.label)).join(", ")}{" "}
+                → {c.dummyNames.join(", ")}
+              </span>
+            ))}
           </span>
         ) : (
           <span className="text-muted-foreground">{prepared.message}</span>
         )}
       </div>
+      <p className="text-xs text-muted-foreground">
+        OK writes the SPSS-format Binary Logistic output (production pipeline, method Enter, default options) to the
+        output viewer, followed by a separate card summarising these experiment results.
+      </p>
 
       <ResponsivenessIndicator active={active} />
 
@@ -622,7 +633,8 @@ export function ExperimentTab({ dependent, covariates, active, onBusyChange, onR
         <p className="text-xs text-muted-foreground">
           Runs the production <code>calculate_binary_logistic</code> (method Enter, default options) through the production
           worker on the original data, then runs all four modes once on the same data and compares B and S.E.
-          (Constant ↔ intercept column). Pass criterion: max difference &lt; 1e-4.
+          (Constant ↔ intercept column, other rows by name incl. dummies such as <code>rank(1)</code>). Pass criterion: max
+          difference &lt; 1e-4.
         </p>
         <Button variant="outline" onClick={handleCompare} disabled={!canRun} data-testid="bl-exp-compare-production">
           {busy === "compare" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Scale className="mr-2 h-4 w-4" />}

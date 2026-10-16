@@ -185,6 +185,26 @@ describe("compareWithProduction", () => {
     expect(c.passed).toBe(true);
   });
 
+  test("baris grup kategorik (tanpa B) dilewati; dummy dicocokkan lewat nama", () => {
+    const exp = { ...experiment, beta: [-0.3, 0.7, 0.2, -0.5], se: [0.3, 0.28, 0.4, 0.41] };
+    const prod = {
+      rows: [
+        { label: "Constant", b: -0.3, se: 0.3 },
+        { label: "x1", b: 0.7, se: 0.28 },
+        { label: "grp", b: 0, se: 0 }, // baris omnibus grup (df > 1)
+        { label: "grp(1)", b: 0.2, se: 0.4 },
+        { label: "grp(2)", b: -0.5, se: 0.41 },
+      ],
+      neg2ll: 70,
+      iterations: 4,
+      converged: true,
+    };
+    const c = compareWithProduction(prod, exp, ["Constant", "x1", "grp(1)", "grp(2)"], "D", 60);
+    expect(c.maxAbsDiffB).toBe(0);
+    expect(c.passed).toBe(true);
+    expect(() => compareWithProduction(prod, exp, ["Constant", "x1", "grp(1)", "zzz"], "D", 60)).toThrow(/no row for "zzz"/);
+  });
+
   test("selisih di atas toleransi → gagal", () => {
     const prod = { rows: [{ label: "Constant", b: -0.2, se: 0.3 }, { label: "x1", b: 0.7, se: 0.28 }, { label: "x2", b: -0.6, se: 0.35 }], neg2ll: null, iterations: null, converged: null };
     expect(compareWithProduction(prod, experiment, ["Constant", "x1", "x2"], "A", 60).passed).toBe(false);

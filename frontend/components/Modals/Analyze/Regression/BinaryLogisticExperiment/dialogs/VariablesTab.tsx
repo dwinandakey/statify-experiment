@@ -9,7 +9,8 @@ import { cn } from "@/lib/utils";
 
 // Pola pemilihan variabel (klik, Ctrl/Shift multi-select, drag-and-drop)
 // mengikuti BinaryLogistic/dialogs/VariablesTab.tsx produksi. Bedanya: tidak
-// ada pilihan metode (selalu Enter) dan kovariat hanya numerik.
+// ada pilihan metode (selalu Enter) dan tidak ada tab Categorical; kovariat
+// nominal/ordinal otomatis kategorik dengan Indicator (Last), default produksi.
 
 interface VariablesTabProps {
   availableVariables: Variable[];
@@ -229,7 +230,7 @@ export const VariablesTab: React.FC<VariablesTabProps> = ({
             <div className="flex-1 min-w-0">
               <label className="font-semibold mb-2 text-sm flex items-center gap-1.5">
                 <Layers className="h-4 w-4 text-primary" />
-                Covariates (numeric):
+                Covariates:
               </label>
               <div
                 className={cn(
@@ -257,8 +258,8 @@ export const VariablesTab: React.FC<VariablesTabProps> = ({
                 ))}
               </div>
               <p className="text-xs text-muted-foreground mt-2">
-                Scale variables only. Nominal, ordinal, and string variables are rejected because this experiment has no
-                Categorical tab.
+                Nominal and ordinal covariates are treated as categorical with the production default contrast: Indicator,
+                reference category Last.
               </p>
             </div>
           </div>

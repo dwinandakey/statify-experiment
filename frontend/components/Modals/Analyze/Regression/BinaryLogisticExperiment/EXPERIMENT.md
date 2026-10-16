@@ -122,15 +122,32 @@ dengan regularisasi.
    `findActualVariable` produksi.
 2. **Listwise deletion**: baris dibuang bila nilai dependen atau kovariat mana
    pun `null`, `undefined`, atau `""` (sama dengan filter `cleanData` di worker produksi).
-3. **Kovariat hanya numerik**: variabel bertipe STRING atau berukuran
-   nominal/ordinal ditolak dengan pesan jelas (produksi akan men-dummy-code
-   variabel nominal/ordinal secara otomatis, dan eksperimen ini tidak punya tab
-   Categorical). Nilai dikonversi dengan `Number()`; nilai NaN ditolak.
-4. **Encoding Y**: salinan `processDependentVariable` produksi:
+3. **Kovariat numerik** (ukuran scale/unknown): `Number()`, nilai NaN ditolak
+   (cabang non-kategorik `processCovariates`).
+4. **Kovariat kategorik**: kovariat berukuran nominal/ordinal otomatis
+   diperlakukan kategorik dengan kontras default produksi, **Indicator dengan
+   referensi Last** (sama dengan yang ditambahkan dialog produksi ke tab
+   Categorical secara otomatis; eksperimen ini tidak punya tab Categorical).
+   Dummy coding meniru dua tahap produksi agar kolomnya identik:
+   1. worker JS (`processCovariates`): nilai unik diurutkan (numerik bila kedua
+      nilai angka, selain itu `localeCompare`); bila semua angka kodenya = nilai
+      itu sendiri, bila tidak kodenya = indeks urutan;
+   2. Rust (`design_matrix::build`): kode unik diurutkan numerik, kategori
+      terakhir = referensi (semua dummy 0), kategori ke-j menjadi kolom
+      `nama(j)` bernilai 1.
+
+   Contoh: `grp` ∈ {low, mid, high} → urutan high, low, mid → `grp(1)` = high,
+   `grp(2)` = low, referensi mid. Dummy diletakkan di posisi kovariatnya.
+   Variabel STRING berukuran scale ditolak (produksi pun gagal mengonversinya);
+   kovariat kategorik dengan < 2 kategori setelah listwise deletion ditolak
+   (produksi akan memasukkannya sebagai kolom konstan).
+5. **Encoding Y**: salinan `processDependentVariable` produksi:
    `[...new Set(rawY)].sort()` (sort **string**, mis. "10" < "9"), nilai pertama → 0,
    kedua → 1, harus tepat 2 level.
-5. `X` dibentuk sebagai `Float64Array` row-major n×p dengan kolom intercept
-   (semua 1) di depan; `y` sebagai `Float64Array` 0/1.
+6. `X` dibentuk sebagai `Float64Array` row-major n×p dengan kolom intercept
+   (semua 1) di depan, lalu kolom kovariat/dummy sesuai urutan (seperti
+   `insert_column(0, 1.0)` di `enter.rs`); `y` sebagai `Float64Array` 0/1.
+   Dummy coding terjadi di sini, jadi inti IRLS dan pengukurannya tidak berubah.
 
 **Resampling ke ukuran N** (`resample(X, y, n, p, targetN, seed)`): baris
 diambil seragam **dengan pengembalian** memakai PRNG mulberry32 ber-seed
@@ -203,6 +220,28 @@ Total run = |N| × (W + R) × 4. Ringkasan per (N, mode): median, IQR (Q1–Q3,
 kuantil tipe 7 seperti default R/NumPy), min, dan max untuk `computeMs`,
 `e2eMs`, dan `maxFrameGapMs`, plus chart median dengan whisker IQR.
 
+### Penyajian hasil: dialog vs output viewer
+
+- **Dialog (tab Experiment)** adalah tempat utama hasil eksperimen: indikator
+  responsivitas, tabel Run once, progress batch, ringkasan median/IQR, chart,
+  validasi akurasi, perbandingan produksi, serta unduhan **CSV** (satu baris
+  per run) dan **meta.json**. Data untuk analisis artikel diambil dari CSV.
+- **Output viewer (tombol OK)** menerima dua kartu di bawah satu log:
+  1. **"Binary Logistic Regression"**: laporan berkonvensi SPSS yang identik
+     dengan modul Binary Logistic produksi (metode Enter, semua opsi default,
+     kategorik Indicator/Last). Isinya dibuat oleh pipeline produksi itu sendiri:
+     worker produksi (`calculate_binary_logistic`), formatter
+     `formatBinaryLogisticResult`, sintaks `generateLogisticRegressionSyntax`,
+     dan pengelompokan komponen yang sama dengan `BinaryLogisticMain.tsx`.
+     Inti eksperimen sengaja hanya menghitung B, S.E., dan −2LL agar
+     perbandingan waktunya adil, sedangkan tabel SPSS juga butuh Block 0,
+     score test, classification table, pseudo-R², dsb.
+  2. **"Binary Logistic (Experiment): 2×2 performance"**: ringkasan Run once,
+     batch (median [Q1–Q3]), akurasi antar mode, dan selisih tiap mode
+     terhadap produksi. Kartu ini menghubungkan laporan SPSS dengan hasil inti
+     eksperimen (selisih koefisien ≤ 1e-15 pada uji E2E) dan ikut tersimpan
+     bersama sesi.
+
 ## 7. Validasi akurasi
 
 | Tingkat | Pembanding | Hasil verifikasi |
@@ -211,7 +250,8 @@ kuantil tipe 7 seperti default R/NumPy), min, dan max untuk `computeMs`,
 | Unit test Rust | Golden values yang sama (toleransi 1e-10), solusi tertutup 2×2, `irls::fit` produksi (toleransi 1e-8) | lulus; selisih aktual ≤ 1,4e-14 vs golden JS dan ≤ 3,6e-15 vs `irls::fit` |
 | Biner wasm | Golden values via Node (`initSync`) | identik bit-per-bit (Δ = 0) |
 | Antar mode (UI) | Per N: max \|Δβ\| dan max \|ΔSE\| tiap mode terhadap run pertama mode D, atas semua ulangan | kriteria < 1e-8 |
-| Terhadap produksi (UI) | Tombol *Compare with production*: `calculate_binary_logistic` (Enter, opsi default) lewat worker produksi pada data N asli; baris "Constant" ↔ kolom intercept, kovariat dicocokkan lewat nama | kriteria < 1e-4 |
+| Terhadap produksi (UI) | Tombol *Compare with production*: `calculate_binary_logistic` (Enter, opsi default, kategorik Indicator/Last) lewat worker produksi pada data N asli; baris "Constant" ↔ kolom intercept, kovariat dan dummy (`nama(j)`) dicocokkan lewat nama, baris omnibus grup kategorik dilewati | kriteria < 1e-4 |
+| Output viewer (E2E) | Laporan SPSS dari tombol OK dibandingkan dengan laporan dialog Binary Logistic produksi untuk data dan variabel yang sama | teks kartu dan sintaks identik |
 
 Kasus step-halving di golden test dipilih dengan sengaja: semua perbandingan
 log-likelihood pada kasus itu jauh di atas noise pembulatan (penurunan LL 0,55%
@@ -284,6 +324,8 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
    mengukur biaya pembuatan worker.
 8. Unduh **CSV** (satu baris per run) dan **meta.json** setelah setiap batch.
    Pastikan tabel akurasi lulus (< 1e-8) dan *Compare with production* lulus (< 1e-4).
+   Klik **OK** untuk menyimpan laporan SPSS dan kartu ringkasan eksperimen ke
+   output viewer (lihat §6, *Penyajian hasil*).
 9. Untuk rekaman demo freeze: pilih mode A atau C, N = 100.000, lalu *Run once*.
    Indikator responsivitas (bar + FPS) digerakkan rAF di main thread, jadi bar
    berhenti selama inti berjalan; ulangi dengan B/D untuk pembanding.

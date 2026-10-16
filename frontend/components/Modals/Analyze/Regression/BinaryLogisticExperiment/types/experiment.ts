@@ -43,6 +43,15 @@ export interface CoreResult {
 
 // --- Data ---
 
+/** Dummy coding Indicator (referensi Last) satu kovariat kategorik. */
+export interface CategoricalCoding {
+  variable: string;
+  /** Urutan kategori seperti design matrix produksi; yang terakhir = referensi. */
+  categories: { label: string; code: number; frequency: number }[];
+  /** Nama kolom dummy, `nama(1)` … `nama(k-1)` (sama dengan label produksi). */
+  dummyNames: string[];
+}
+
 export interface PreparedData {
   /** Row-major n×p, kolom 0 = intercept (semua 1). Jangan dimutasi. */
   X: Float64Array;
@@ -50,7 +59,7 @@ export interface PreparedData {
   y: Float64Array;
   n: number;
   p: number;
-  /** ["Constant", ...nama kovariat] sesuai urutan kolom X. */
+  /** ["Constant", ...nama kolom] sesuai urutan kolom X (dummy: `nama(j)`). */
   featureNames: string[];
   /** Pemetaan nilai asli Y → 0/1, persis model_info.y_encoding produksi. */
   yEncoding: Record<string, number>;
@@ -59,6 +68,8 @@ export interface PreparedData {
   nMissing: number;
   dependent: Variable;
   covariates: Variable[];
+  /** Kovariat kategorik (nominal/ordinal) beserta dummy coding-nya. */
+  categoricalCodings: CategoricalCoding[];
 }
 
 export interface DatasetForRun {

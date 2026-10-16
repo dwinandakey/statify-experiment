@@ -9,7 +9,12 @@ import { defineConfig, devices } from "@playwright/test";
  *
  * Jalankan dari root repo setelah `npm run build --workspace=frontend`:
  *   npx playwright test -c tests/experiment/playwright.experiment.config.ts
- * Server `next start` (port 3001) dipakai ulang bila sudah berjalan.
+ *
+ * Server `next start` (port 3001) dijalankan langsung lewat node (bukan
+ * `npm run start`): di Windows, mematikan pembungkus npm tidak ikut mematikan
+ * proses node anaknya, dan server yang tertinggal akan melayani build lama
+ * (chunk webpack dibalas 400, aplikasi gagal hydrate). Karena itu server yang
+ * sudah berjalan TIDAK dipakai ulang kecuali EXPERIMENT_REUSE_SERVER=1.
  */
 const PORT = Number(process.env.EXPERIMENT_PORT ?? 3001);
 
@@ -26,6 +31,9 @@ export default defineConfig({
   use: {
     baseURL: `http://localhost:${PORT}`,
     acceptDownloads: true,
+    // Langkah yang macet gagal cepat dengan pesan jelas, bukan menghabiskan timeout test
+    actionTimeout: 30 * 1000,
+    navigationTimeout: 60 * 1000,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
@@ -36,10 +44,10 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npm run start",
+    command: `node ../node_modules/next/dist/bin/next start -p ${PORT}`,
     cwd: "../../frontend",
     port: PORT,
-    reuseExistingServer: true,
+    reuseExistingServer: process.env.EXPERIMENT_REUSE_SERVER === "1",
     timeout: 120 * 1000,
   },
 });

@@ -1,10 +1,12 @@
 /**
  * Unit test persiapan data eksperimen Binary Logistic (Experiment):
  * listwise deletion, encoding Y (salinan processDependentVariable produksi),
- * penolakan kovariat kategorik, dan resampling ber-seed.
+ * dummy coding kategorik Indicator (Last) seperti pipeline produksi, dan
+ * resampling ber-seed.
  */
 import type { Variable } from "@/types/Variable";
 import {
+  encodeCategorical,
   encodeDependent,
   prepareExperimentData,
   resample,
@@ -78,9 +80,35 @@ describe("prepareExperimentData", () => {
     expect(r.yEncoding).toEqual({ "0": 0, "1": 1 });
   });
 
-  test("kovariat nominal/ordinal/string ditolak dengan pesan jelas", () => {
-    expect(() => prepareExperimentData(data, vars, vars[0], [vars[1], vars[3]])).toThrow(/rank[\s\S]*ordinal[\s\S]*numeric \(scale\) covariates only/);
-    expect(() => prepareExperimentData(data, vars, vars[0], [vars[4]])).toThrow(/string variable/);
+  test("kovariat ordinal di-dummy Indicator (Last) di posisinya, setelah kovariat numerik", () => {
+    const r = prepareExperimentData(data, vars, vars[0], [vars[1], vars[3]]);
+    // gpa tidak dipilih, jadi baris gpa = null tetap ikut. Baris sisa: rank 3, 3, 4, 4, 4
+    // → kategori 3, 4 → referensi 4 → satu dummy rank(1)
+    expect(r.n).toBe(5);
+    expect(r.featureNames).toEqual(["Constant", "gre", "rank(1)"]);
+    expect(r.p).toBe(3);
+    expect(Array.from(r.X)).toEqual([1, 380, 1, 1, 660, 1, 1, 640, 0, 1, 520, 0, 1, 800, 0]);
+    expect(r.categoricalCodings).toEqual([
+      {
+        variable: "rank",
+        categories: [
+          { label: "3", code: 3, frequency: 2 },
+          { label: "4", code: 4, frequency: 3 },
+        ],
+        dummyNames: ["rank(1)"],
+      },
+    ]);
+  });
+
+  test("STRING ber-ukuran scale ditolak; STRING nominal diterima sebagai kategorik", () => {
+    const stringScale = mkVar(6, 4, "label2", "scale", "STRING");
+    const varsWithScaleString = [...vars.slice(0, 4), stringScale];
+    expect(() => prepareExperimentData(data, varsWithScaleString, vars[0], [stringScale])).toThrow(
+      /string variable[\s\S]*Nominal or Ordinal/
+    );
+    const r = prepareExperimentData(data, vars, vars[0], [vars[4]]);
+    expect(r.featureNames[0]).toBe("Constant");
+    expect(r.categoricalCodings[0].variable).toBe("label");
   });
 
   test("nilai non-numerik pada kovariat scale ditolak", () => {
@@ -101,6 +129,44 @@ describe("prepareExperimentData", () => {
     expect(() => prepareExperimentData(data, vars, null, [vars[1]])).toThrow(/dependent/);
     expect(() => prepareExperimentData(data, vars, vars[0], [])).toThrow(/covariate/);
     expect(() => prepareExperimentData([], vars, vars[0], [vars[1]])).toThrow(/empty/);
+  });
+});
+
+describe("encodeCategorical (aturan processCovariates + design_matrix::build produksi)", () => {
+  const col = (cols: Float64Array[], j: number) => Array.from(cols[j]);
+
+  test("kode numerik: urut numerik, kategori terakhir referensi", () => {
+    const { columns, coding } = encodeCategorical([2, 1, 4, 3, 1, 4], "rank");
+    expect(coding.categories.map((c) => c.label)).toEqual(["1", "2", "3", "4"]);
+    expect(coding.dummyNames).toEqual(["rank(1)", "rank(2)", "rank(3)"]);
+    expect(col(columns, 0)).toEqual([0, 1, 0, 0, 1, 0]); // rank = 1
+    expect(col(columns, 1)).toEqual([1, 0, 0, 0, 0, 0]); // rank = 2
+    expect(col(columns, 2)).toEqual([0, 0, 0, 1, 0, 0]); // rank = 3; rank = 4 semua 0
+  });
+
+  test("angka dalam teks diurutkan numerik (9 < 10), berbeda dengan encoding Y", () => {
+    const { columns, coding } = encodeCategorical(["10", "9", "9"], "g");
+    expect(coding.categories.map((c) => c.label)).toEqual(["9", "10"]);
+    expect(col(columns, 0)).toEqual([0, 1, 1]);
+  });
+
+  test("teks: urutan localeCompare → kode indeks, referensi kategori terakhir", () => {
+    const { columns, coding } = encodeCategorical(["low", "mid", "high", "low"], "grp");
+    expect(coding.categories.map((c) => c.label)).toEqual(["high", "low", "mid"]);
+    expect(coding.categories.map((c) => c.frequency)).toEqual([1, 2, 1]);
+    expect(coding.dummyNames).toEqual(["grp(1)", "grp(2)"]);
+    expect(col(columns, 0)).toEqual([0, 0, 1, 0]); // high
+    expect(col(columns, 1)).toEqual([1, 0, 0, 1]); // low; mid = referensi
+  });
+
+  test('"1" dan "1.0" bernilai sama → satu kategori (seperti kunci f64 di Rust)', () => {
+    const { coding } = encodeCategorical(["1", "1.0", "2"], "d");
+    expect(coding.categories.map((c) => c.code)).toEqual([1, 2]);
+    expect(coding.categories[0].frequency).toBe(2);
+  });
+
+  test("hanya satu kategori → error jelas", () => {
+    expect(() => encodeCategorical(["a", "a"], "only")).toThrow(/only 1 category/);
   });
 });
 

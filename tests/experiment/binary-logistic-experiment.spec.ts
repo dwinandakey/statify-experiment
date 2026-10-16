@@ -1,21 +1,27 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
 
 /**
  * E2E menu "Binary Logistic (Experiment)" pada production build:
- * - Run once di keempat mode → beta & S.E. identik (< 1e-8)
+ * - Run once di keempat mode → beta & S.E. identik (< 1e-8), termasuk dummy kategorik
  * - Compare with production → cocok dengan Enter produksi (< 1e-4)
  * - Batch kecil → selesai, akurasi < 1e-8, CSV per run + meta.json
+ * - OK → output viewer berisi laporan SPSS yang IDENTIK dengan dialog Binary
+ *   Logistic produksi (data, variabel, dan opsi default yang sama) + kartu eksperimen
  * - Smoke test dialog Binary Logistic produksi (satu run Enter)
  * - Tidak ada error console/pageerror dari kode aplikasi
  *
- * Dataset: fixtures/bl_experiment_small.csv (303 baris, 3 baris tidak lengkap
- * → N = 300 setelah listwise deletion), diimpor lewat File → Import Data → CSV.
+ * Dataset: fixtures/bl_experiment_small.csv (303 baris; 3 baris tidak lengkap
+ * → N = 300 setelah listwise deletion). Kolom grp (teks: low/mid/high) diimpor
+ * sebagai nominal → kategorik Indicator (Last): urutan high, low, mid → referensi mid.
  */
 const FIXTURE = path.join(__dirname, "fixtures", "bl_experiment_small.csv");
-const COVARIATES = ["x1", "x2", "x3"];
+const COVARIATES = ["x1", "x2", "x3", "grp"];
+const FEATURES = ["Constant", "x1", "x2", "x3", "grp(1)", "grp(2)"];
 const MODES = ["A", "B", "C", "D"] as const;
+const SPSS_TITLE = "Binary Logistic Regression";
+const EXPERIMENT_TITLE = "Binary Logistic (Experiment): 2×2 performance";
 
 function collectErrors(page: Page) {
   const errors: string[] = [];
@@ -26,9 +32,18 @@ function collectErrors(page: Page) {
   return errors;
 }
 
+/** Buka menu bar sampai `visible` terlihat (klik sebelum hydration selesai bisa hilang). */
+async function openMenu(page: Page, trigger: Locator, visible: Locator) {
+  await expect(async () => {
+    if (!(await visible.isVisible())) await trigger.click();
+    await expect(visible).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 30_000 });
+}
+
 async function importFixture(page: Page) {
   await page.goto("/dashboard/data");
-  await page.getByTestId("file-menu-trigger").click();
+  await page.waitForLoadState("networkidle");
+  await openMenu(page, page.getByTestId("file-menu-trigger"), page.getByTestId("file-menu-import-trigger"));
   await page.getByTestId("file-menu-import-trigger").click();
   await page.getByTestId("file-menu-import-csv").click();
   await page.getByTestId("dropzone-input").setInputFiles(FIXTURE);
@@ -38,9 +53,62 @@ async function importFixture(page: Page) {
 }
 
 async function openRegressionItem(page: Page, item: string) {
-  await page.getByTestId("analyze-menu-trigger").click();
+  await openMenu(page, page.getByTestId("analyze-menu-trigger"), page.getByRole("menuitem", { name: "Regression" }));
   await page.getByRole("menuitem", { name: "Regression" }).click();
   await page.getByRole("menuitem", { name: item, exact: true }).click();
+}
+
+/** Jumlah statistik per analytic berjudul `title` (urut id), dibaca langsung dari IndexedDB "Statify". */
+function statisticsPerAnalytic(page: Page, title: string): Promise<number[]> {
+  return page.evaluate(
+    (t) =>
+      new Promise<number[]>((resolve, reject) => {
+        const req = indexedDB.open("Statify");
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const db = req.result;
+          const tx = db.transaction(["analytics", "statistics"], "readonly");
+          const analytics = tx.objectStore("analytics").getAll();
+          const statistics = tx.objectStore("statistics").getAll();
+          tx.oncomplete = () => {
+            const ids = (analytics.result as { id: number; title: string }[])
+              .filter((a) => a.title === t)
+              .map((a) => a.id)
+              .sort((a, b) => a - b);
+            const stats = statistics.result as { analyticId: number }[];
+            resolve(ids.map((id) => stats.filter((s) => s.analyticId === id).length));
+            db.close();
+          };
+          tx.onerror = () => reject(tx.error);
+        };
+      }),
+    title
+  );
+}
+
+/**
+ * Tunggu sampai `expectedAnalytics` analytic berjudul `title` ada dan jumlah
+ * statistiknya tidak berubah selama 1,5 s (produksi menulis statistik satu per
+ * satu; pindah halaman terlalu cepat akan memutus penulisan).
+ */
+async function waitForWrittenAnalytics(page: Page, title: string, expectedAnalytics: number) {
+  let lastKey = "";
+  let stableSince = 0;
+  await expect
+    .poll(
+      async () => {
+        const counts = await statisticsPerAnalytic(page, title);
+        const key = JSON.stringify(counts);
+        const now = Date.now();
+        if (key !== lastKey) {
+          lastKey = key;
+          stableSince = now;
+        }
+        return counts.length === expectedAnalytics && counts.every((c) => c > 0) && now - stableSince >= 1500;
+      },
+      { timeout: 120_000, intervals: [250] }
+    )
+    .toBe(true);
 }
 
 const maxAbsDiff = (a: number[], b: number[]) => Math.max(...a.map((v, i) => Math.abs(v - b[i])));
@@ -74,7 +142,16 @@ async function readCoefficients(page: Page) {
   return { beta: await read("bl-exp-coef-b-"), se: await read("bl-exp-coef-se-") };
 }
 
-test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV", async ({ page }) => {
+async function selectProductionVariables(page: Page) {
+  await page.getByTestId("binary-logistic-variable-item-y").click();
+  await page.getByTestId("binary-logistic-move-to-dependent").click();
+  for (const v of COVARIATES) {
+    await page.getByTestId(`binary-logistic-variable-item-${v}`).click();
+    await page.getByTestId("binary-logistic-move-to-covariates").click();
+  }
+}
+
+test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV, SPSS output", async ({ page }) => {
   const errors = collectErrors(page);
   await importFixture(page);
 
@@ -92,6 +169,8 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV"
 
   await page.getByTestId("bl-exp-tab-experiment").click();
   await expect(page.getByTestId("bl-exp-n-original")).toHaveText("300");
+  await expect(page.getByTestId("bl-exp-coding-grp")).toContainText("high, low, mid (reference)");
+  await expect(page.getByTestId("bl-exp-coding-grp")).toContainText("grp(1), grp(2)");
 
   // --- Run once di keempat mode ---
   const results: Record<string, { beta: number[]; se: number[] }> = {};
@@ -101,7 +180,7 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV"
     await expect(page.locator(`[data-testid="bl-exp-single-result"][data-mode="${m}"]`)).toBeVisible();
     await expect(page.getByTestId("bl-exp-run-once")).toBeEnabled();
     results[m] = await readCoefficients(page);
-    expect(results[m].beta).toHaveLength(1 + COVARIATES.length);
+    expect(results[m].beta).toHaveLength(FEATURES.length);
     expect(results[m].beta.every(Number.isFinite)).toBe(true);
   }
   for (const m of ["A", "B", "C"]) {
@@ -112,7 +191,7 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV"
     expect(ds).toBeLessThan(1e-8);
   }
 
-  // --- Compare with production (Enter) ---
+  // --- Compare with production (Enter, termasuk dummy kategorik) ---
   await page.getByTestId("bl-exp-compare-production").click();
   await expect(page.getByTestId("bl-exp-production-status")).toBeVisible({ timeout: 120_000 });
   for (const m of MODES) {
@@ -142,7 +221,7 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV"
   const csv = fs.readFileSync((await csvDownload.path())!, "utf8").trim().split(/\r?\n/).map(parseCsvLine);
   const header = csv[0];
   expect(csv).toHaveLength(1 + 2 * 2 * 4);
-  for (const col of ["mode", "N", "computeMs", "e2eMs", "overheadMs", "maxFrameGapMs", "droppedFrames", "longTaskCount", "B_Constant", "SE_x3", "userAgent", "hardwareConcurrency", "crossOriginIsolated", "buildMode", "gitCommit"]) {
+  for (const col of ["mode", "N", "computeMs", "e2eMs", "overheadMs", "maxFrameGapMs", "droppedFrames", "longTaskCount", "B_Constant", "B_grp(1)", "SE_grp(2)", "userAgent", "hardwareConcurrency", "crossOriginIsolated", "buildMode", "gitCommit"]) {
     expect(header).toContain(col);
   }
   const col = (row: string[], name: string) => row[header.indexOf(name)];
@@ -161,9 +240,47 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, batch + CSV"
   expect(meta.orders).toHaveLength(2 * 2);
   expect(meta.environment.crossOriginIsolated).toBe(true);
 
-  // OK menulis ringkasan ke output viewer lalu menutup dialog
+  // --- OK: laporan SPSS (pipeline produksi) + kartu eksperimen di output viewer ---
   await page.getByTestId("bl-exp-ok").click();
-  await expect(page.getByTestId("bl-exp-dialog")).toHaveCount(0);
+  await expect(page.getByTestId("bl-exp-dialog")).toHaveCount(0, { timeout: 120_000 });
+  const ours = await statisticsPerAnalytic(page, SPSS_TITLE);
+  expect(ours).toHaveLength(1);
+  expect(ours[0]).toBeGreaterThan(5);
+  expect(await statisticsPerAnalytic(page, EXPERIMENT_TITLE)).toEqual([5]);
+
+  // --- Dialog Binary Logistic produksi dengan data & variabel yang sama ---
+  await openRegressionItem(page, "Binary Logistic...");
+  await selectProductionVariables(page);
+  await page.getByRole("button", { name: "OK", exact: true }).click();
+  await expect
+    .poll(() => statisticsPerAnalytic(page, SPSS_TITLE), { timeout: 120_000 })
+    .toEqual([ours[0], ours[0]]);
+
+  // --- Output viewer: kedua laporan SPSS harus identik ---
+  await page.goto("/dashboard/result");
+  const spssCards = page.locator('[data-testid^="result-analytic-"]').filter({
+    has: page.locator('[data-testid^="analytic-title-"]', { hasText: new RegExp(`^${SPSS_TITLE}$`) }),
+  });
+  await expect(spssCards).toHaveCount(2, { timeout: 60_000 });
+  for (const heading of ["Variables in the Equation", "Categorical Variables Codings", "Model Summary", "Classification Table"]) {
+    await expect(spssCards.nth(0).getByText(heading, { exact: true }).first()).toBeVisible();
+  }
+  const [experimentText, productionText] = [await spssCards.nth(0).innerText(), await spssCards.nth(1).innerText()];
+  expect(experimentText.length).toBeGreaterThan(500);
+  expect(experimentText).toEqual(productionText);
+  const logHeaders = await page
+    .locator('[data-testid^="log-header-"]')
+    .evaluateAll((els) => els.map((e) => (e.textContent ?? "").replace(/^Log \d+:\s*/, "")));
+  expect(logHeaders).toHaveLength(2);
+  expect(logHeaders[0]).toEqual(logHeaders[1]);
+  const experimentCard = page.locator('[data-testid^="result-analytic-"]').filter({
+    has: page.locator('[data-testid^="analytic-title-"]', { hasText: EXPERIMENT_TITLE }),
+  });
+  await expect(experimentCard).toHaveCount(1);
+  await expect(experimentCard).toContainText("Batch summary");
+  await expect(experimentCard).toContainText("Experiment vs production");
+  await expect(experimentCard).toContainText("PASS");
+  console.log(`SPSS output identical to production (${experimentText.length} chars); syntax: ${logHeaders[0]}`);
 
   console.log(`Console/page errors:\n${errors.join("\n") || "(none)"}`);
   expect(errors.filter((e) => !/Failed to load resource/.test(e))).toEqual([]);
@@ -173,15 +290,9 @@ test("production Binary Logistic (Enter) still runs", async ({ page }) => {
   const errors = collectErrors(page);
   await importFixture(page);
   await openRegressionItem(page, "Binary Logistic...");
-
-  await page.getByTestId("binary-logistic-variable-item-y").click();
-  await page.getByTestId("binary-logistic-move-to-dependent").click();
-  for (const v of COVARIATES) {
-    await page.getByTestId(`binary-logistic-variable-item-${v}`).click();
-    await page.getByTestId("binary-logistic-move-to-covariates").click();
-  }
+  await selectProductionVariables(page);
   await page.getByRole("button", { name: "OK", exact: true }).click();
-  await expect(page.getByRole("button", { name: "OK", exact: true })).toBeEnabled({ timeout: 120_000 });
+  await waitForWrittenAnalytics(page, SPSS_TITLE, 1);
 
   await page.goto("/dashboard/result");
   await expect(page.getByText("Variables in the Equation").first()).toBeVisible({ timeout: 60_000 });

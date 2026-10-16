@@ -2,16 +2,20 @@
  * Persiapan data bersama untuk keempat mode eksperimen. Dijalankan SEKALI di
  * main thread, di luar jendela pengukuran waktu.
  *
- * Aturan listwise deletion, validasi kovariat, dan encoding Y disalin dari
- * worker produksi public/workers/Regression/binaryLogistic.worker.js
- * (filter `cleanData`, `processCovariates` cabang non-kategorik, dan
- * `processDependentVariable`) supaya hasilnya sebanding dengan Enter produksi.
+ * Aturannya disalin dari pipeline produksi supaya design matrix X identik
+ * dengan yang dibangun Enter produksi:
+ * - worker produksi public/workers/Regression/binaryLogistic.worker.js:
+ *   filter `cleanData` (listwise deletion), `processCovariates` (encoding
+ *   kovariat), `processDependentVariable` (encoding Y);
+ * - Rust rust/src/stats/design_matrix.rs `build` (dummy coding kategorik:
+ *   kategori diurutkan numerik, Indicator dengan referensi Last, nama
+ *   kolom `nama(j)`), lalu strategies/enter.rs menyisipkan intercept di kolom 0.
  */
 import type { DataRow } from "@/types/Data";
 import type { Variable } from "@/types/Variable";
 import { useDataStore } from "@/stores/useDataStore";
 import { useVariableStore } from "@/stores/useVariableStore";
-import type { DatasetForRun, PreparedData } from "../types/experiment";
+import type { CategoricalCoding, DatasetForRun, PreparedData } from "../types/experiment";
 import { mulberry32 } from "./prng";
 
 /**
@@ -29,15 +33,22 @@ export function findActualVariable(currentVariables: Variable[], target: Variabl
   return found ?? null;
 }
 
-/** Kovariat kategorik/string ditolak karena eksperimen ini tidak punya tab Categorical. */
-export function covariateRejectionReason(v: Variable): string | null {
+/**
+ * Kovariat nominal/ordinal diperlakukan kategorik (sama dengan deteksi
+ * otomatis produksi) dengan kontras default produksi: Indicator, referensi Last.
+ */
+export function isCategoricalCovariate(v: Variable): boolean {
   const measure = v.measure?.toLowerCase();
-  if (v.type === "STRING") {
-    return `Covariate "${v.name}" is a string variable.`;
-  }
-  // Produksi otomatis memperlakukan nominal/ordinal sebagai kategorik (dummy coding).
-  if (measure === "nominal" || measure === "ordinal") {
-    return `Covariate "${v.name}" has measurement level ${measure}; production would dummy-code it as categorical.`;
+  return measure === "nominal" || measure === "ordinal";
+}
+
+/**
+ * Variabel STRING dengan ukuran scale tidak pernah bisa dipakai (produksi
+ * juga gagal: nilai teks tidak bisa dijadikan angka), jadi ditolak lebih awal.
+ */
+export function covariateRejectionReason(v: Variable): string | null {
+  if (v.type === "STRING" && !isCategoricalCovariate(v)) {
+    return `Covariate "${v.name}" is a string variable with measurement level ${v.measure}. Set its measurement level to Nominal or Ordinal so it is treated as categorical.`;
   }
   return null;
 }
@@ -63,6 +74,62 @@ export function encodeDependent(rawY: (string | number)[]): {
   return { yVector, yMap: map };
 }
 
+/**
+ * Dummy coding Indicator (referensi Last) untuk satu kovariat kategorik,
+ * mengikuti dua tahap produksi:
+ * 1. worker JS (`processCovariates`): nilai unik diurutkan (numerik bila
+ *    keduanya angka, selain itu localeCompare); bila semua angka kodenya
+ *    = nilai itu sendiri, bila tidak kodenya = indeks urutan;
+ * 2. Rust (`design_matrix::build`): kode unik diurutkan numerik, kategori
+ *    terakhir menjadi referensi (semua dummy 0), kategori ke-j (1-based)
+ *    menjadi kolom `nama(j)` bernilai 1.
+ */
+export function encodeCategorical(
+  rawValues: (string | number)[],
+  name: string
+): { columns: Float64Array[]; coding: CategoricalCoding } {
+  const sortedValues = Array.from(new Set(rawValues)).sort((a, b) => {
+    const numA = Number(a);
+    const numB = Number(b);
+    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+    return String(a).localeCompare(String(b));
+  });
+  const isAllNumeric = sortedValues.every((val) => !isNaN(Number(val)) && val !== "");
+  const codeMap = new Map<string, number>();
+  sortedValues.forEach((val, index) => {
+    codeMap.set(String(val), isAllNumeric ? Number(val) : index + 0.0);
+  });
+
+  const rowCodes = rawValues.map((v) => codeMap.get(String(v)) ?? 0.0);
+  const categoryCodes = Array.from(new Set(rowCodes)).sort((a, b) => a - b);
+  if (categoryCodes.length < 2) {
+    throw new Error(
+      `Categorical covariate "${name}" has only ${categoryCodes.length} category after listwise deletion; at least 2 are required.`
+    );
+  }
+
+  const n = rawValues.length;
+  const k = categoryCodes.length;
+  const columns = Array.from({ length: k - 1 }, () => new Float64Array(n));
+  const frequency = new Array<number>(k).fill(0);
+  for (let i = 0; i < n; i++) {
+    const c = categoryCodes.indexOf(rowCodes[i]);
+    frequency[c]++;
+    if (c < k - 1) columns[c][i] = 1;
+  }
+
+  // Label kategori: nilai asli pertama (urutan produksi) yang menghasilkan kode tsb
+  const labelOf = (code: number) => String(sortedValues.find((v) => codeMap.get(String(v)) === code) ?? code);
+  return {
+    columns,
+    coding: {
+      variable: name,
+      categories: categoryCodes.map((code, c) => ({ label: labelOf(code), code, frequency: frequency[c] })),
+      dummyNames: Array.from({ length: k - 1 }, (_, j) => `${name}(${j + 1})`),
+    },
+  };
+}
+
 export function prepareExperimentData(
   data: DataRow[],
   variables: Variable[],
@@ -84,12 +151,7 @@ export function prepareExperimentData(
   });
 
   const rejected = covs.map(covariateRejectionReason).filter((r): r is string => r !== null);
-  if (rejected.length > 0) {
-    throw new Error(
-      `${rejected.join(" ")} This experiment accepts numeric (scale) covariates only because it has no Categorical tab. ` +
-        `Change the measurement level to Scale if the variable is truly numeric, or remove it.`
-    );
-  }
+  if (rejected.length > 0) throw new Error(rejected.join(" "));
 
   // Listwise deletion (sama dengan filter cleanData di worker produksi)
   const cols = [dep.columnIndex, ...covs.map((c) => c.columnIndex)];
@@ -100,26 +162,30 @@ export function prepareExperimentData(
   if (cleanRows.length === 0) {
     throw new Error("No valid cases remaining after missing value handling.");
   }
-
   const n = cleanRows.length;
-  const k = covs.length;
-  const p = k + 1;
 
-  // Kovariat numerik: Number(val), nilai NaN ditolak (cabang non-kategorik processCovariates)
-  const X = new Float64Array(n * p);
+  // Kolom design matrix sesuai urutan kovariat: numerik → 1 kolom, kategorik → k-1 dummy
+  const designColumns: Float64Array[] = [];
+  const featureNames: string[] = ["Constant"];
+  const categoricalCodings: CategoricalCoding[] = [];
   const invalid: { name: string; value: unknown; row: number }[] = [];
-  for (let i = 0; i < n; i++) {
-    const row = cleanRows[i];
-    X[i * p] = 1;
-    for (let j = 0; j < k; j++) {
-      const raw = row[covs[j].columnIndex];
-      const num = Number(raw);
-      if (isNaN(num)) {
-        invalid.push({ name: covs[j].name, value: raw, row: i });
-        X[i * p + j + 1] = 0;
-      } else {
-        X[i * p + j + 1] = num;
-      }
+  for (const cov of covs) {
+    const raw = cleanRows.map((row) => row[cov.columnIndex] as string | number);
+    if (isCategoricalCovariate(cov)) {
+      const { columns, coding } = encodeCategorical(raw, cov.name);
+      designColumns.push(...columns);
+      featureNames.push(...coding.dummyNames);
+      categoricalCodings.push(coding);
+    } else {
+      // Cabang non-kategorik processCovariates: Number(val), NaN ditolak
+      const col = new Float64Array(n);
+      raw.forEach((val, i) => {
+        const num = Number(val);
+        if (isNaN(num)) invalid.push({ name: cov.name, value: val, row: i });
+        else col[i] = num;
+      });
+      designColumns.push(col);
+      featureNames.push(cov.name);
     }
   }
   if (invalid.length > 0) {
@@ -132,8 +198,17 @@ export function prepareExperimentData(
     throw new Error(
       `Variable(s) ${names.join(", ")} contain non-numeric value(s) that cannot be used as a scale covariate: ${sample}` +
         (remaining > 0 ? `, and ${remaining} more` : "") +
-        "."
+        `. If this variable is categorical, set its measurement level to Nominal/Ordinal.`
     );
+  }
+
+  // X row-major dengan intercept di kolom 0 (seperti insert_column(0, 1.0) di enter.rs)
+  const p = designColumns.length + 1;
+  const X = new Float64Array(n * p);
+  for (let i = 0; i < n; i++) {
+    const row = i * p;
+    X[row] = 1;
+    for (let j = 0; j < designColumns.length; j++) X[row + j + 1] = designColumns[j][i];
   }
 
   const rawY = cleanRows.map((row) => row[dep.columnIndex] as string | number);
@@ -145,12 +220,13 @@ export function prepareExperimentData(
     y,
     n,
     p,
-    featureNames: ["Constant", ...covs.map((c) => c.name)],
+    featureNames,
     yEncoding: yMap,
     nTotal: data.length,
     nMissing: data.length - n,
     dependent: dep,
     covariates: covs,
+    categoricalCodings,
   };
 }
 
