@@ -66,9 +66,11 @@ Semua file eksperimen:
 | `frontend/public/workers/Regression/BinaryExperiment/jsCore.worker.js` | Worker mode B |
 | `frontend/public/workers/Regression/BinaryExperiment/wasmCore.worker.js` | Worker mode D |
 | `frontend/public/workers/Regression/BinaryExperiment/pkg/` | Paket wasm eksperimen (hasil `wasm-pack --target web`) |
+| `frontend/public/workers/Regression/BinaryExperiment/ARTIFACT_HASHES.json` | SHA-256 keenam artefak yang diukur (§8) |
 | `frontend/components/Modals/Analyze/Regression/BinaryLogistic/rust/src/bench/` | Inti IRLS Rust (`irls_core.rs`) + golden test data |
 | `frontend/components/Modals/Analyze/Regression/BinaryLogisticExperiment/` | Dialog, services, tipe, skrip (`scripts/`), dokumen ini |
-| `frontend/__tests__/irlsCore.experiment.test.js`, `binaryLogisticExperiment.*.test.ts`, `logisticEnterParity.experiment.test.js` | Unit test Jest |
+| `frontend/scripts/` | Build lintas-OS: `build-experiment.mjs`, `build-wasm-experiment.mjs`, `hashArtifacts.mjs` (§8–9) |
+| `frontend/__tests__/irlsCore.experiment.test.js`, `binaryLogisticExperiment.*.test.{ts,js}`, `logisticEnterParity.experiment.test.js` | Unit test Jest |
 | `tests/experiment/` | E2E Playwright (config terpisah + fixture CSV) dan runner benchmark `benchmark-workloads.spec.ts` |
 | `reproducibility/` | Data keempat batch artikel, skrip analisis (tabel dan gambar), `REPRODUCE.md` |
 
@@ -456,8 +458,8 @@ Toolchain dan dependensi dikunci di crate `BinaryLogistic/rust`:
   rustup memasangnya otomatis saat cargo/wasm-pack dijalankan di folder crate.
   Bagian *producers* di `statify_logistic_bg.wasm` yang diukur mencatat rustc
   1.91.1 dan wasm-bindgen 0.2.129, tanpa fitur `simd128`.
-- `Cargo.lock` (di-commit dengan `git add -f` karena `.gitignore` repo berisi
-  `**/Cargo.lock`): nalgebra 0.32.6, statrs 0.16.1, serde_json 1.0.154,
+- `Cargo.lock` (di-commit; `.gitignore` repo berisi `**/Cargo.lock` dan hanya
+  path crate ini yang dikecualikan): nalgebra 0.32.6, statrs 0.16.1, serde_json 1.0.154,
   wasm-bindgen 0.2.129, serde-wasm-bindgen 0.4.5.
 - wasm-pack 0.13.1 (`cargo install wasm-pack --version 0.13.1 --locked`); CLI
   wasm-bindgen yang sesuai lock dan wasm-opt (binaryen 117) diunduh otomatis.
@@ -470,7 +472,7 @@ npm run build:wasm:experiment             # build lalu salin ke public/.../Binar
 npm run build:wasm:experiment -- --check  # build lalu bandingkan SHA-256 dengan pkg yang ter-commit
 ```
 
-Script (`scripts/build-wasm-experiment.mjs`) menjalankan
+Script (`frontend/scripts/build-wasm-experiment.mjs`) menjalankan
 `wasm-pack build --target web --release --out-dir target/experiment-pkg`
 di crate `BinaryLogistic/rust` (profil release default: `opt-level = 3`, tanpa
 LTO, lalu `wasm-opt -O`), kemudian menyalin `statify_logistic*` ke
@@ -484,6 +486,17 @@ eksperimen memuat seluruh crate (termasuk fungsi produksi) plus modul `bench`
 (`irls_core_bench`, `calculate_binary_logistic_timed`, `last_full_timings`),
 sehingga ukuran `.wasm` (~763 KB) dan biaya `init()` sebanding dengan paket
 produksi.
+
+**Hash artefak.** `frontend/scripts/hashArtifacts.mjs` menulis SHA-256 keenam artefak
+yang diukur (`pkg/statify_logistic_bg.wasm`, `pkg/statify_logistic.js`, `irls_core.js`,
+`logistic_enter.js`, `jsCore.worker.js`, `wasmCore.worker.js`) ke
+`public/workers/Regression/BinaryExperiment/ARTIFACT_HASHES.json` dan dijalankan
+otomatis oleh `npm run build:experiment` (§9). File `.wasm` di-hash byte demi byte;
+file teks di-hash setelah CRLF → LF, karena dengan `core.autocrlf=true` byte di disk
+bergantung pada OS dan waktu checkout. Hasilnya sama dengan isi blob git di semua OS
+(`git show HEAD:<path> | sha256sum`). `--check` membandingkan tanpa menulis. Paket wasm
+yang diukur: SHA-256 `3a1104c816ae140620a7d1cb2f13060a6072cfbe71de4d4026d29dcf8e61505d`,
+dipatok juga oleh test Jest `binaryLogisticExperiment.artifacts.test.js`.
 
 Unit test:
 
@@ -513,17 +526,27 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
 
    ```bash
    cd frontend
-   npm run build:experiment   # next build dengan NEXT_PUBLIC_GIT_COMMIT = HEAD
+   npm run build:experiment   # hash artefak + next build dengan NEXT_PUBLIC_GIT_COMMIT dari git describe
    npm run start              # next start -p 3001 → http://localhost:3001
    ```
 
-   `build:experiment` (`scripts/build-experiment.mjs`) selalu mengisi
-   `NEXT_PUBLIC_GIT_COMMIT` dari `git rev-parse --short HEAD`, mengabaikan nilai
-   yang sudah ada di environment, dan menambahkan akhiran `-dirty` bila file yang
-   dilacak git berubah (`-- --dry-run` hanya menampilkan nilainya). Jangan mengisi
-   variabel itu manual lalu menjalankan `npm run build`: nilai yang tertinggal di
-   terminal ikut ke build berikutnya. Itu yang terjadi pada keempat batch artikel,
-   yang mencatat `gitCommit = 2c8bb04a` padahal build berasal dari `b6747315`
+   `build:experiment` (`frontend/scripts/build-experiment.mjs`, lintas-OS) berjalan
+   dalam empat langkah:
+   1. `hashArtifacts.mjs` memperbarui `ARTIFACT_HASHES.json` (§8).
+   2. `NEXT_PUBLIC_GIT_COMMIT` selalu diisi dengan
+      `git describe --always --dirty --abbrev=8` (mis. `experiment-v1.0.0-3-g1a2b3c4d`,
+      atau akhiran `-dirty`), dan nilai yang sudah ada di environment diabaikan.
+   3. Build **ditolak** (exit 1) bila working tree dirty, yaitu ada file terlacak yang
+      berubah, kecuali `EXPERIMENT_ALLOW_DIRTY=1`. File untracked tidak dihitung, sama
+      dengan `git describe --dirty`. Karena hash dihitung lebih dulu, artefak yang
+      berubah tanpa `ARTIFACT_HASHES.json` baru yang di-commit juga menggagalkan build.
+   4. `frontend/next-env.d.ts` (dilacak git, tetapi ditulis ulang Next pada setiap
+      build) dikembalikan ke versi HEAD sebelum cek dan sesudah `next build`.
+
+   `-- --dry-run` hanya menampilkan nilai dan keputusan build tanpa menulis apa pun.
+   Jangan mengisi variabel itu manual lalu menjalankan `npm run build`: nilai yang
+   tertinggal di terminal ikut ke build berikutnya. Itu yang terjadi pada keempat batch
+   artikel v1, yang mencatat `gitCommit = 2c8bb04a` padahal build berasal dari `b6747315`
    (bukti di `reproducibility/REPRODUCE.md` §3).
 2. Satu browser saja (disarankan Chrome/Edge versi stabil terbaru) dan **catat
    versinya** (juga tercatat di `userAgent`). `longtask` dan `performance.memory`

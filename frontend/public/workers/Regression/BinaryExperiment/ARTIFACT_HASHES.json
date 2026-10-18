@@ -1,0 +1,30 @@
+{
+  "description": "SHA-256 artefak eksperimen yang diukur, dibuat oleh frontend/scripts/hashArtifacts.mjs (npm run build:experiment); jangan diedit manual. File teks di-hash setelah CRLF → LF (sama dengan isi blob git di semua OS), file .wasm byte demi byte. bytes = panjang isi yang di-hash.",
+  "algorithm": "sha256",
+  "files": {
+    "pkg/statify_logistic_bg.wasm": {
+      "bytes": 763303,
+      "sha256": "3a1104c816ae140620a7d1cb2f13060a6072cfbe71de4d4026d29dcf8e61505d"
+    },
+    "pkg/statify_logistic.js": {
+      "bytes": 16229,
+      "sha256": "6f4653c01438322c3431b869f1dfafc2bc45a287b4ad9ea00b6b35b258e2ea9b"
+    },
+    "irls_core.js": {
+      "bytes": 8718,
+      "sha256": "1a6d57a11e69477ddc0ee6d8e4f98483aeb6e05cc066435eda95f38397d0574c"
+    },
+    "logistic_enter.js": {
+      "bytes": 46254,
+      "sha256": "f72e5f63b9b10f757482fa663317aeb49567b82930ad27f35aa7d75f1668b8a3"
+    },
+    "jsCore.worker.js": {
+      "bytes": 3134,
+      "sha256": "72cd2e2e354af41c9e400d7cd52c0a9542003f5573702045a0ab7985208512e3"
+    },
+    "wasmCore.worker.js": {
+      "bytes": 4157,
+      "sha256": "31eebe706e28f93ec6ea6f7ec8d9453f18b8b488ff709929ce68df6b22fab7db"
+    }
+  }
+}

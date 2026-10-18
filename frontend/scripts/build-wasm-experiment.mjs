@@ -8,6 +8,9 @@
 // BinaryLogistic/rust. Toolchain dikunci rust-toolchain.toml (1.91.1) dan dependensi oleh
 // Cargo.lock. Biner byte-identik hanya bila dibangun di path yang sama: rustc menanam path
 // absolut sumber dependensi (mis. ~/.cargo/registry/...) di pesan panic.
+//
+// pkg/ yang ter-commit adalah biner yang diukur (SHA-256 di ARTIFACT_HASHES.json, dipatok test
+// Jest binaryLogisticExperiment.artifacts). Tanpa --check, paket itu ditimpa.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
@@ -15,7 +18,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const frontend = resolve(here, "../../../../../..");
+const frontend = resolve(here, "..");
 const crate = join(frontend, "components/Modals/Analyze/Regression/BinaryLogistic/rust");
 const outDir = join(crate, "target/experiment-pkg");
 const pkgDir = join(frontend, "public/workers/Regression/BinaryExperiment/pkg");
