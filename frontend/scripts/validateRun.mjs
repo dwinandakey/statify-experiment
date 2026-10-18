@@ -12,6 +12,8 @@
 //   - gitCommit sama di semua sesi dan tanpa -dirty; hash .wasm = ARTIFACT_HASHES.json repo dan
 //     wasmHashVerified = true;
 //   - versi browser sama di semua sesi browser yang sama;
+//   - viewport (innerWidth × innerHeight) dan devicePixelRatio sama di semua batch browser yang
+//     sama (tidak disamakan antar browser; lihat EXPERIMENT.md §10);
 //   - fokus: visibilityState "visible" di awal dan akhir batch dan jendela browser menjadi
 //     foreground OS di awal dan akhir batch (session.json). document.hasFocus() hanya dilaporkan:
 //     Firefox di bawah otomasi WebDriver BiDi selalu melaporkan false.
@@ -185,6 +187,14 @@ export function validateRun(runDir) {
   for (const [browser, vs] of Object.entries(versions)) {
     if (vs.size > 1) violations.push(`run: ${browser} version differs between sessions: ${[...vs].join(", ")}`);
   }
+  // Viewport dan DPR tidak disamakan antar browser (jendela dimaksimalkan, EXPERIMENT.md §10),
+  // jadi harus konstan di semua batch browser yang sama
+  const viewports = viewportsByBrowser(sessions);
+  for (const [browser, groups] of Object.entries(viewports)) {
+    if (groups.length > 1) {
+      violations.push(`run: ${browser} viewport differs between batches: ${groups.map((g) => `${g.viewport} (${g.batches.join(", ")})`).join("; ")}`);
+    }
+  }
 
   // Kesepakatan koefisien antar sel, sesi, dan browser
   const agreement = [];
@@ -236,7 +246,28 @@ export function validateRun(runDir) {
       }
     }
   }
-  return { runId: run.runId, config: cfg, sessions, violations, info, agreement, medians, deviations, cells };
+  return { runId: run.runId, config: cfg, sessions, violations, info, agreement, medians, deviations, cells, viewports };
+}
+
+/** "innerWidth×innerHeight @DPR" dari meta.environment (CSS px; DPR 3 desimal). */
+export function viewportLabel(env) {
+  const dpr = Number(env?.devicePixelRatio);
+  return `${env?.innerWidth ?? "?"}×${env?.innerHeight ?? "?"} @${Number.isFinite(dpr) ? Number(dpr.toFixed(3)) : "?"}`;
+}
+
+/** Per browser: nilai viewport berbeda beserta batch ("<sesi> <workload>") yang memakainya. */
+export function viewportsByBrowser(sessions) {
+  const out = {};
+  for (const s of sessions) {
+    for (const [workload, b] of Object.entries(s.batches)) {
+      const groups = (out[s.browser] ??= []);
+      const viewport = viewportLabel(b.meta.environment);
+      let g = groups.find((x) => x.viewport === viewport);
+      if (!g) groups.push((g = { viewport, batches: [] }));
+      g.batches.push(`${s.id} ${workload}`);
+    }
+  }
+  return out;
 }
 
 const f = (v, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : "–");
@@ -245,11 +276,17 @@ const dur = (ms) => (Number.isFinite(ms) ? `${Math.floor(ms / 60000)}m${String(M
 export function renderMarkdown(r) {
   const lines = [`# Validasi run ${r.runId}`, ""];
   lines.push(`Hasil: **${r.violations.length === 0 ? "LULUS" : `${r.violations.length} pelanggaran`}**`, "");
-  lines.push("## Sesi", "", "| sesi | browser | versi | peran | status | durasi | impor | urutan workload | urutan N (core / full) |", "|---|---|---|---|---|---:|---:|---|---|");
+  lines.push(
+    "## Sesi",
+    "",
+    "| sesi | browser | versi | peran | status | durasi | impor | viewport (CSS px @DPR) | urutan workload | urutan N (core / full) |",
+    "|---|---|---|---|---|---:|---:|---|---|---|"
+  );
   for (const s of r.sessions) {
     const order = (w) => s.batches[w]?.meta.sizeOrderUsed?.join("→") ?? "–";
+    const viewport = [...new Set(Object.values(s.batches).map((b) => viewportLabel(b.meta.environment)))].join(", ") || "–";
     lines.push(
-      `| ${s.id} | ${s.browser} | ${s.session.browserVersion ?? "–"} | ${s.role} | ${s.session.status} | ${dur(s.session.durationMs)} | ${dur(s.session.importMs)} | ${(s.session.workloadOrder ?? []).join(" → ")} | ${order("core")} / ${order("full")} |`
+      `| ${s.id} | ${s.browser} | ${s.session.browserVersion ?? "–"} | ${s.role} | ${s.session.status} | ${dur(s.session.durationMs)} | ${dur(s.session.importMs)} | ${viewport} | ${(s.session.workloadOrder ?? []).join(" → ")} | ${order("core")} / ${order("full")} |`
     );
   }
   lines.push("", "## Kesepakatan koefisien antar sel, sesi, dan browser", "", "| workload | N | runs | max abs ΔB | max abs ΔS.E. |", "|---|---:|---:|---:|---:|");
@@ -303,6 +340,7 @@ function main() {
         info: [...new Set(r.info)],
         agreement: r.agreement,
         deviations: r.deviations,
+        viewports: r.viewports,
         sessions: r.sessions.map((s) => ({ id: s.id, browser: s.browser, role: s.role, status: s.session.status, durationMs: s.session.durationMs })),
         medians: r.medians,
       },

@@ -793,8 +793,8 @@ repo. Ringkasnya:
    - semua run konvergen dengan jumlah iterasi sama; tabel SPSS identik (full);
    - |ΔB|, |ΔS.E.| < 1e-8 antar sel, sesi, dan browser;
    - `gitCommit` sama dan tanpa `-dirty`; hash wasm sesuai dan `wasmHashVerified`;
-   - versi browser sama per browser; `visibilityState` "visible" dan jendela foreground OS di
-     awal dan akhir tiap batch.
+   - versi browser, viewport, dan DPR sama per browser; `visibilityState` "visible" dan
+     jendela foreground OS di awal dan akhir tiap batch.
 
    Ringkasan Markdown (`validation.md`) berisi durasi sesi, median `computeMs`/`e2eMs` per sel
    per sesi, dan sesi yang menyimpang > 25% dari median sesi lain browser yang sama. Exit
@@ -892,13 +892,31 @@ Keterbatasan tambahan v2:
   `bringToFront`. Karena itu validator memakai `visibilityState` dan status foreground OS (sama
   untuk kedua browser); `hasFocus` hanya dicatat. Dengan jendela foreground di kedua browser,
   *foreground boost* penjadwal Windows berlaku setara.
-- **Viewport dan DPR.** Tidak ada emulasi viewport. Di layar laptop 1920×1080 dengan skala
-  Windows 165%, viewport 1600×1000 CSS px tidak muat, dan `browsingContext.setViewport` Firefox
-  tidak pernah selesai di layar berskala. Jendela dimaksimalkan lewat OS untuk kedua browser.
-  DPR native-nya 1,65 (Chrome) dan 1,667 (Firefox), dan viewport sekitar 1164×511 (Chrome,
-  dengan infobar otomasi) dan 1152×575 CSS px (Firefox). Nilai aktual tercatat per batch
-  (`devicePixelRatio`, `innerWidth`, `innerHeight`). Ukuran viewport memengaruhi biaya
-  render per frame, bukan `computeMs`.
+- **Viewport dan DPR.** Viewport tidak diemulasi dan tidak disamakan antar browser. Di layar
+  laptop 1920×1080 dengan skala Windows 165%, viewport 1600×1000 CSS px tidak muat, dan
+  `browsingContext.setViewport` Firefox tidak pernah selesai di layar berskala. Jendela kedua
+  browser dimaksimalkan lewat OS, sehingga viewport-nya 1164×511 CSS px @1,65 (Chrome, dengan
+  infobar otomasi) dan 1152×575 @1,667 (Firefox). DPR memang tidak bisa disamakan: Firefox
+  menyatakan DPR sebagai 60/n dengan n bulat (*app units*), jadi skala 1,65 menjadi
+  60/36 = 1,667. Alasan viewport tidak disamakan:
+  1. Ukuran viewport tidak masuk ke besaran yang diukur. Progres batch di-render di luar
+     jendela ukur. Selama jendela ukur halaman tidak berubah, kecuali ekor transisi progress
+     bar (poin berikut) dan ikon spinner (animasi `transform` yang dijalankan compositor).
+     Keduanya elemen kecil yang sama di semua sel.
+  2. Sel dibandingkan di dalam browser yang sama, dan viewport konstan per browser.
+  3. Viewport CSS yang sama pun tidak menyamakan pekerjaan render antar engine, karena DPR,
+     font, scrollbar, dan UI browser tetap berbeda. Perbedaan antar browser dibaca sebagai
+     efek browser secara keseluruhan.
+
+  Nilai aktual tercatat per batch (`devicePixelRatio`, `innerWidth`, `innerHeight`), dan
+  validator mewajibkan nilainya sama di semua batch browser yang sama. Jendela yang gagal
+  dimaksimalkan akan terdeteksi: di uji asap dengan `--window-position`, viewport Chrome
+  menjadi 1037×486.
+- **Transisi progress bar.** Lebar progress bar batch memakai transisi CSS 150 ms
+  (`transition-[width]`), lebih lama dari jeda antar run (2 frame + 50 ms ≈ 83 ms pada 60 Hz).
+  Akibatnya, ekor transisi (±4 frame pada 60 Hz) masuk ke awal jendela ukur run berikutnya:
+  style, layout, dan paint satu elemen kecil per frame di main thread. Kondisi ini sama untuk
+  semua sel dan sama dengan v1. Ia sengaja tidak diubah agar titik ukur tetap sama.
 - **Resolusi timer.** Firefox (cross-origin isolated) memberi 20 µs, Chrome 5 µs
   (`timerResolutionMs`), sehingga `computeMs` N kecil dan rincian latensi worker lebih kasar
   di Firefox. `longTaskCount`, `mainHeapUsedMB`, `battery`, dan `uaHighEntropy` null di Firefox.

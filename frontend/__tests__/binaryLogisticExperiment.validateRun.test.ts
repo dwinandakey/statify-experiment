@@ -1,7 +1,7 @@
 /**
  * Validator run v2 (scripts/validateRun.mjs), fungsi murninya dengan data sintetis:
  * jumlah run per (N, sel), error, pageHidden, clockCheckFailed, konvergensi, iterasi sama,
- * tabel SPSS (workload full), selisih koefisien, dan parser CSV ber-kutip.
+ * tabel SPSS (workload full), selisih koefisien, viewport per browser, dan parser CSV ber-kutip.
  * Skrip berupa ES module, jadi dijalankan di proses Node terpisah.
  */
 import { execFileSync } from "node:child_process";
@@ -77,6 +77,28 @@ test("selisih koefisien maksimum terhadap baris acuan; NaN terbawa sebagai selis
     `const r = m.maxCoefDiff([{ ...${JSON.stringify(ref)}, B_Constant: "x" }], ${JSON.stringify(ref)}); console.log(JSON.stringify({ beta: Number.isNaN(r.beta) ? null : r.beta }));`
   );
   expect(withNaN.beta).toBeNull();
+});
+
+test("viewport dan DPR dikelompokkan per browser; DPR float32 Chrome dibulatkan 3 desimal", () => {
+  const batchWith = (innerWidth: number, innerHeight: number, devicePixelRatio: number) => ({
+    meta: { environment: { innerWidth, innerHeight, devicePixelRatio } },
+  });
+  // chrome-02: jendela gagal dimaksimalkan (kasus uji asap dengan --window-position)
+  const sessions = [
+    { id: "chrome-01", browser: "chrome", batches: { core: batchWith(1164, 511, 1.6500000953674316), full: batchWith(1164, 511, 1.6500000953674316) } },
+    { id: "firefox-01", browser: "firefox", batches: { core: batchWith(1152, 575, 1.6666666666666667) } },
+    { id: "chrome-02", browser: "chrome", batches: { full: batchWith(1037, 486, 1.6500000953674316) } },
+  ];
+  const v = withModule<Record<string, { viewport: string; batches: string[] }[]>>(
+    `console.log(JSON.stringify(m.viewportsByBrowser(${JSON.stringify(sessions)})));`
+  );
+  expect(v).toEqual({
+    chrome: [
+      { viewport: "1164×511 @1.65", batches: ["chrome-01 core", "chrome-01 full"] },
+      { viewport: "1037×486 @1.65", batches: ["chrome-02 full"] },
+    ],
+    firefox: [{ viewport: "1152×575 @1.667", batches: ["firefox-01 core"] }],
+  });
 });
 
 test("parser CSV: field ber-kutip berisi koma dan kutip ganda", () => {

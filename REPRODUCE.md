@@ -111,6 +111,9 @@ lifecycle interleaved, 1 pilot + 10 sesi per browser, cooldown 120 s, `orderSeed
   (Linux); battery saver mati.
 - Tutup aplikasi lain; matikan notifikasi, pembaruan otomatis, dan antivirus scan terjadwal
   bila memungkinkan; layar tidak boleh mati atau terkunci selama run.
+- Jangan ubah resolusi atau skala layar dan jangan pindah monitor di tengah run. Jendela
+  browser dimaksimalkan tanpa emulasi viewport, jadi viewport dan DPR mengikuti layar.
+  Validator mewajibkan nilainya sama di semua sesi browser yang sama.
 - **Jangan memakai komputer selama run.** Orkestrator membawa jendela browser ke foreground
   sebelum setiap batch (Windows); input pengguna akan merusak status foreground dan visibilitas
   yang divalidasi.
