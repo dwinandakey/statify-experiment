@@ -1,0 +1,30 @@
+{
+  "description": "Sesi ukur eksperimen v2 (tests/experiment/orchestrate.mjs). Path relatif terhadap root repo. orderSeed sesi = orderSeedBase + indeks global sesi di jadwal (0-based). window.mode 'maximized': tanpa emulasi viewport; jendela dimaksimalkan lewat OS, DPR dan ukuran viewport aktual dicatat di meta.environment.",
+  "baseUrl": "http://localhost:3002",
+  "startServer": true,
+  "datasetPath": "experiment-data/brfss_bench_100k.csv",
+  "dependent": "Diabetes_binary",
+  "covariates": ["HighBP", "HighChol", "BMI", "PhysActivity", "Sex", "Age", "Income", "GenHlth"],
+  "sizes": [1000, 10000, 50000, 100000],
+  "warmup": 5,
+  "repetitions": 30,
+  "sampling": "prefix",
+  "sizeOrder": "shuffled",
+  "lifecycle": "interleaved",
+  "dataSeed": 42,
+  "workloads": ["core", "full"],
+  "browsers": [
+    { "name": "chrome", "executablePath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" },
+    { "name": "firefox", "executablePath": "C:\\Program Files\\Mozilla Firefox\\firefox.exe" }
+  ],
+  "protocol": "webDriverBiDi",
+  "headless": false,
+  "window": { "mode": "maximized" },
+  "foreground": true,
+  "pilotSessions": 1,
+  "sessions": 10,
+  "cooldownSec": 120,
+  "orderSeedBase": 1000,
+  "batchTimeoutMin": 45,
+  "outputDir": "benchmark-results"
+}

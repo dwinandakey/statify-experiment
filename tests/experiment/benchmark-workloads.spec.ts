@@ -25,20 +25,29 @@ import path from "node:path";
  *   $env:EXPERIMENT_PORT = "3002"
  *   npx playwright test -c tests/experiment/playwright.experiment.config.ts benchmark-workloads
  *
- * Variabel lain (default = batch HR Attrition): EXPERIMENT_BENCH_DEPENDENT,
- * EXPERIMENT_BENCH_COVARIATES (dipisah koma), EXPERIMENT_BENCH_WORKLOADS
- * ("core,core:per-run,full,full:per-run"), EXPERIMENT_BENCH_WARMUP (5),
- * EXPERIMENT_BENCH_REPETITIONS (30), EXPERIMENT_BENCH_SEED (42). Ukuran N: N asli
- * + 10.000 + 50.000 + 100.000 (default dialog).
+ * Default (batch HR Attrition artikel v1) ada di tests/experiment/bench.v1-hr.json
+ * (EXPERIMENT_BENCH_CONFIG untuk berkas lain). Variabel berikut menimpanya:
+ * EXPERIMENT_BENCH_DEPENDENT, EXPERIMENT_BENCH_COVARIATES (dipisah koma),
+ * EXPERIMENT_BENCH_WORKLOADS (mis. "core,core:per-run,full,full:per-run"),
+ * EXPERIMENT_BENCH_WARMUP, EXPERIMENT_BENCH_REPETITIONS, EXPERIMENT_BENCH_SEED. Ukuran N:
+ * N asli + 10.000 + 50.000 + 100.000 (default dialog).
  */
 const env = process.env;
+interface LegacyConfig {
+  dependent: string;
+  covariates: string[];
+  workloads: string[];
+  warmup: number;
+  repetitions: number;
+  seed: number;
+}
+const CONFIG: LegacyConfig = JSON.parse(
+  fs.readFileSync(env.EXPERIMENT_BENCH_CONFIG ?? path.join(__dirname, "bench.v1-hr.json"), "utf8")
+);
 const DATA = env.EXPERIMENT_BENCH_DATA;
 const OUT = env.EXPERIMENT_BENCH_OUT ?? path.join(__dirname, "../../benchmark-results");
-const DEPENDENT = env.EXPERIMENT_BENCH_DEPENDENT ?? "Attrition";
-const COVARIATES = (
-  env.EXPERIMENT_BENCH_COVARIATES ??
-  "Age,BusinessTravel,DistanceFromHome,MaritalStatus,MonthlyIncome,MonthlyRate,OverTime,TotalWorkingYears,YearsAtCompany"
-)
+const DEPENDENT = env.EXPERIMENT_BENCH_DEPENDENT ?? CONFIG.dependent;
+const COVARIATES = (env.EXPERIMENT_BENCH_COVARIATES ?? CONFIG.covariates.join(","))
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -46,7 +55,7 @@ interface BatchSpec {
   workload: "core" | "full";
   perRun: boolean;
 }
-const BATCHES: BatchSpec[] = (env.EXPERIMENT_BENCH_WORKLOADS ?? "core,core:per-run,full,full:per-run")
+const BATCHES: BatchSpec[] = (env.EXPERIMENT_BENCH_WORKLOADS ?? CONFIG.workloads.join(","))
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean)
@@ -56,9 +65,9 @@ const BATCHES: BatchSpec[] = (env.EXPERIMENT_BENCH_WORKLOADS ?? "core,core:per-r
     if (!["persistent", "warm", "per-run", "cold"].includes(lifecycle)) throw new Error(`Unknown lifecycle in "${entry}"`);
     return { workload, perRun: lifecycle === "per-run" || lifecycle === "cold" };
   });
-const WARMUP = env.EXPERIMENT_BENCH_WARMUP ?? "5";
-const REPETITIONS = env.EXPERIMENT_BENCH_REPETITIONS ?? "30";
-const SEED = env.EXPERIMENT_BENCH_SEED ?? "42";
+const WARMUP = env.EXPERIMENT_BENCH_WARMUP ?? String(CONFIG.warmup);
+const REPETITIONS = env.EXPERIMENT_BENCH_REPETITIONS ?? String(CONFIG.repetitions);
+const SEED = env.EXPERIMENT_BENCH_SEED ?? String(CONFIG.seed);
 
 test.use({ channel: env.EXPERIMENT_BENCH_CHANNEL || undefined });
 

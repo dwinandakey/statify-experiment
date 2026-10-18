@@ -4,8 +4,8 @@
  * - Info sesi dari query URL: expSession (id), expSessionIndex, expRole (pilot|measure),
  *   expBrowser. Disimpan ke meta.session dan kolom CSV sessionId/sessionIndex/sessionRole.
  * - Hook window.__blExp, HANYA aktif bila URL halaman berisi expAutomation=1:
- *   getBatchOutputs(), clearBatchOutputs(), exportDesign(N). Tanpa parameter itu tidak ada
- *   yang dipasang di window dan tidak ada output batch yang disimpan.
+ *   getBatchOutputs(), clearBatchOutputs(), waitForBatchOutputs(count), exportDesign(N).
+ *   Tanpa parameter itu tidak ada yang dipasang di window dan tidak ada output batch yang disimpan.
  */
 import type { SessionInfo, Workload } from "../types/experiment";
 import { sha256Hex } from "./metrics";
@@ -48,10 +48,25 @@ export interface BatchOutput {
 }
 
 const batchOutputs: BatchOutput[] = [];
+const outputWaiters: { count: number; resolve: (n: number) => void }[] = [];
 
 /** Simpan output batch yang selesai (apa pun statusnya); no-op tanpa expAutomation=1. */
 export function recordBatchOutput(output: BatchOutput): void {
-  if (automationEnabled()) batchOutputs.push(output);
+  if (!automationEnabled()) return;
+  batchOutputs.push(output);
+  for (let i = outputWaiters.length - 1; i >= 0; i--) {
+    if (batchOutputs.length >= outputWaiters[i].count) outputWaiters.splice(i, 1)[0].resolve(batchOutputs.length);
+  }
+}
+
+/**
+ * Promise yang selesai saat jumlah output batch ≥ count. Tanpa polling: orkestrator menunggu
+ * batch lewat satu evaluate yang menggantung, sehingga tidak ada kerja tambahan di main thread
+ * (rAF/MutationObserver) selama jendela ukur.
+ */
+function waitForBatchOutputs(count: number): Promise<number> {
+  if (batchOutputs.length >= count) return Promise.resolve(batchOutputs.length);
+  return new Promise((resolve) => outputWaiters.push({ count, resolve }));
 }
 
 // --- Ekspor design matrix (baseline native) ---
@@ -107,6 +122,8 @@ interface AutomationHook {
   version: 1;
   getBatchOutputs(): BatchOutput[];
   clearBatchOutputs(): void;
+  /** Selesai saat getBatchOutputs().length ≥ count (event-driven, tanpa polling). */
+  waitForBatchOutputs(count: number): Promise<number>;
   exportDesign(N: number): Promise<DesignExport>;
 }
 
@@ -126,6 +143,7 @@ export function installAutomationHook(provider: DesignProvider): () => void {
       clearBatchOutputs: () => {
         batchOutputs.length = 0;
       },
+      waitForBatchOutputs,
       exportDesign: (N: number) => {
         if (!designProvider) return Promise.reject(new Error("Open the Binary Logistic (Experiment) dialog first."));
         return designProvider(N);

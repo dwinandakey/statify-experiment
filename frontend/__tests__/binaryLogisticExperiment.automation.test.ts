@@ -8,6 +8,7 @@ import type { DesignExport } from "@/components/Modals/Analyze/Regression/Binary
 type Hook = {
   getBatchOutputs(): { batchId: string }[];
   clearBatchOutputs(): void;
+  waitForBatchOutputs(count: number): Promise<number>;
   exportDesign(N: number): Promise<DesignExport>;
 };
 const hook = () => (window as unknown as { __blExp?: Hook }).__blExp;
@@ -49,4 +50,23 @@ test("dengan expAutomation=1: getBatchOutputs, clearBatchOutputs, exportDesign",
   release();
   expect(hook()!.getBatchOutputs().map((o) => o.batchId)).toEqual(["b3"]);
   await expect(hook()!.exportDesign(10)).rejects.toThrow(/Open the Binary Logistic \(Experiment\) dialog/);
+});
+
+test("waitForBatchOutputs selesai saat output ke-n tercatat (tanpa polling)", async () => {
+  window.history.pushState({}, "", "/dashboard/data?expAutomation=1");
+  const m = await freshModule();
+  const release = m.installAutomationHook(async () => ({}) as DesignExport);
+  m.recordBatchOutput(output("b1"));
+  await expect(hook()!.waitForBatchOutputs(1)).resolves.toBe(1);
+  let settled = 0;
+  const second = hook()!.waitForBatchOutputs(2).then((n) => (settled = n));
+  const third = hook()!.waitForBatchOutputs(3).then((n) => n);
+  await Promise.resolve();
+  expect(settled).toBe(0);
+  m.recordBatchOutput(output("b2"));
+  await second;
+  expect(settled).toBe(2);
+  m.recordBatchOutput(output("b3"));
+  await expect(third).resolves.toBe(3);
+  release();
 });
