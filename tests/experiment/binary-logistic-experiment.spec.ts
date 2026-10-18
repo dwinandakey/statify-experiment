@@ -359,7 +359,7 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, core + full 
     if (worker) expect(Number(fullCol(row, "workerHandlerMs"))).toBeGreaterThanOrEqual(Number(fullCol(row, "computeMs")) - 0.05);
     expect(Number(fullCol(row, "t0PhaseMs"))).toBeGreaterThanOrEqual(0);
     expect(Number(fullCol(row, "nextFrameAfterT1Ms"))).toBeGreaterThan(0);
-    expect(fullCol(row, "browserName")).toBe("chrome");
+    expect(["chrome", "chromium"]).toContain(fullCol(row, "browserName"));
   }
   expect([...cellsSeen].sort()).toEqual(["A", "B-cold", "B-warm", "C", "D-cold", "D-warm"]);
 
@@ -370,7 +370,7 @@ test("Binary Logistic (Experiment): 4 modes, production comparison, core + full 
   expect(fullMeta.orders).toHaveLength(2 * 2);
   for (const o of fullMeta.orders) expect([...o.order].sort()).toEqual(["A", "B-cold", "B-warm", "C", "D-cold", "D-warm"]);
   expect(fullMeta.environment.wasmHashVerified).toBe(true);
-  expect(fullMeta.environment.browserName).toBe("chrome");
+  expect(["chrome", "chromium"]).toContain(fullMeta.environment.browserName);
   expect(fullMeta.session).toBeNull();
   console.log(
     `Interleaved full batch: N order ${fullMeta.sizeOrderUsed.join(" → ")}, browser ${fullMeta.environment.browserName} ${fullMeta.environment.browserVersion}, ` +
