@@ -12,7 +12,7 @@ import {
   YAxis,
   type TooltipContentProps,
 } from "recharts";
-import type { ExperimentMode, ModeSummary, SummaryStats } from "../types/experiment";
+import type { CellId, ModeSummary, SummaryStats } from "../types/experiment";
 import { fmtInt, fmtMs } from "../services/format";
 
 export type ChartMetric = "e2eMs" | "computeMs" | "maxFrameGapMs" | "totalMs" | "formatMs";
@@ -33,9 +33,10 @@ export const CHART_METRICS: Record<"core" | "full", ChartMetric[]> = {
 
 /*
  * Small multiples: satu panel per N (skala y masing-masing, karena besaran
- * waktu antar N berbeda jauh). Di tiap panel sumbu x = lokasi eksekusi dan
- * dua seri = teknologi, mencerminkan desain 2×2: A/C = main thread,
- * B/D = Web Worker; JS = slot kategorikal 1 (biru), Wasm = slot 2 (oranye).
+ * waktu antar N berbeda jauh). Di tiap panel sumbu x = lokasi eksekusi (dan
+ * siklus hidup worker) dan dua seri = teknologi: A/C = main thread, B/D =
+ * Web Worker persistent (warm) dan/atau per-run (cold) sesuai sel yang ada di
+ * batch; JS = slot kategorikal 1 (biru), Wasm = slot 2 (oranye).
  * Palet divalidasi dataviz/validate_palette.js terhadap surface terang
  * (#ffffff) dan gelap (#0d1117) aplikasi: semua cek PASS.
  * Batang = median, whisker = IQR (Q1–Q3). Tabel ringkasan = table view.
@@ -50,32 +51,37 @@ interface Row {
   js: number | null;
   jsErr: [number, number];
   jsStats: SummaryStats | null;
-  jsMode: ExperimentMode;
+  jsCell: CellId;
   wasm: number | null;
   wasmErr: [number, number];
   wasmStats: SummaryStats | null;
-  wasmMode: ExperimentMode;
+  wasmCell: CellId;
 }
 
 function rowsFor(N: number, summaries: ModeSummary[], metric: ChartMetric): Row[] {
-  const stat = (mode: ExperimentMode) => summaries.find((s) => s.N === N && s.mode === mode)?.[metric] ?? null;
+  const atN = summaries.filter((s) => s.N === N);
+  const stat = (cell: CellId) => atN.find((s) => s.cell === cell)?.[metric] ?? null;
+  const has = (cell: CellId) => atN.some((s) => s.cell === cell);
   const err = (s: SummaryStats | null): [number, number] => (s ? [s.median - s.q1, s.q3 - s.median] : [0, 0]);
-  const make = (location: string, jsMode: ExperimentMode, wasmMode: ExperimentMode): Row => {
-    const js = stat(jsMode);
-    const wasm = stat(wasmMode);
+  const make = (location: string, jsCell: CellId, wasmCell: CellId): Row => {
+    const js = stat(jsCell);
+    const wasm = stat(wasmCell);
     return {
       location,
       js: js?.median ?? null,
       jsErr: err(js),
       jsStats: js,
-      jsMode,
+      jsCell,
       wasm: wasm?.median ?? null,
       wasmErr: err(wasm),
       wasmStats: wasm,
-      wasmMode,
+      wasmCell,
     };
   };
-  return [make("Main thread", "A", "C"), make("Web Worker", "B", "D")];
+  const rows = [make("Main thread", "A", "C")];
+  if (has("B-warm") || has("D-warm")) rows.push(make("Worker (persistent)", "B-warm", "D-warm"));
+  if (has("B-cold") || has("D-cold")) rows.push(make("Worker (per-run)", "B-cold", "D-cold"));
+  return rows;
 }
 
 function compactTick(v: number): string {
@@ -86,9 +92,9 @@ function compactTick(v: number): string {
 function ChartTooltip({ active, payload }: TooltipContentProps<number, string>) {
   if (!active || !payload || payload.length === 0) return null;
   const row = payload[0].payload as Row;
-  const lines: { key: string; color: string; mode: ExperimentMode; tech: string; s: SummaryStats | null }[] = [
-    { key: "js", color: "var(--viz-js)", mode: row.jsMode, tech: "JavaScript", s: row.jsStats },
-    { key: "wasm", color: "var(--viz-wasm)", mode: row.wasmMode, tech: "Rust-Wasm", s: row.wasmStats },
+  const lines: { key: string; color: string; cell: CellId; tech: string; s: SummaryStats | null }[] = [
+    { key: "js", color: "var(--viz-js)", cell: row.jsCell, tech: "JavaScript", s: row.jsStats },
+    { key: "wasm", color: "var(--viz-wasm)", cell: row.wasmCell, tech: "Rust-Wasm", s: row.wasmStats },
   ];
   return (
     <div className="rounded-md border border-border bg-popover px-3 py-2 text-xs shadow-md">
@@ -98,7 +104,7 @@ function ChartTooltip({ active, payload }: TooltipContentProps<number, string>) 
           <span className="inline-block h-0.5 w-3 rounded" style={{ background: l.color }} aria-hidden />
           <span className="font-semibold tabular-nums text-foreground">{l.s ? `${fmtMs(l.s.median)} ms` : "–"}</span>
           <span className="text-muted-foreground">
-            {l.mode} · {l.tech}
+            {l.cell} · {l.tech}
             {l.s ? ` · IQR ${fmtMs(l.s.q1)}–${fmtMs(l.s.q3)}` : ""}
           </span>
         </div>

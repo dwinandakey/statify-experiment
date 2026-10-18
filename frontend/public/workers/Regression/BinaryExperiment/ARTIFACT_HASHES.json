@@ -19,12 +19,12 @@
       "sha256": "f72e5f63b9b10f757482fa663317aeb49567b82930ad27f35aa7d75f1668b8a3"
     },
     "jsCore.worker.js": {
-      "bytes": 3134,
-      "sha256": "72cd2e2e354af41c9e400d7cd52c0a9542003f5573702045a0ab7985208512e3"
+      "bytes": 3664,
+      "sha256": "3261a09c4f30a90ecb2739a574a5d4358f92b640304fcfb5fa8b2c07a5bcf56b"
     },
     "wasmCore.worker.js": {
-      "bytes": 4157,
-      "sha256": "31eebe706e28f93ec6ea6f7ec8d9453f18b8b488ff709929ce68df6b22fab7db"
+      "bytes": 4797,
+      "sha256": "65d4cff866fda849a441f52328d7ea141dceee0e0d9f6b728380b3a2a045a809"
     }
   }
 }

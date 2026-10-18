@@ -24,11 +24,18 @@
  * wasmCoreMs = analisis di dalam Wasm (tanpa salin-masuk dan serialisasi),
  * wasmSerializeMs = serde_json::to_string di dalam Wasm; keduanya dibaca
  * setelah computeMs dihitung.
+ *
+ * Eksperimen v2: hasil "run"/"run_full" juga membawa tRecvEpochMs (baris pertama
+ * handler pesan) dan tPostEpochMs (tepat sebelum postMessage hasil) dalam epoch
+ * performance.timeOrigin + performance.now(), untuk merinci overheadMs di main thread.
+ * Titik ukur computeMs tidak berubah.
  */
 import init, { irls_core_bench, calculate_binary_logistic_timed, last_full_timings } from "./pkg/statify_logistic.js";
 
 let initPromise = null;
 let wasm = null;
+
+const epochNow = () => performance.timeOrigin + performance.now();
 
 function ensureInit() {
   if (!initPromise) {
@@ -41,6 +48,7 @@ function ensureInit() {
 }
 
 self.onmessage = async (event) => {
+  const tRecvEpochMs = epochNow();
   const msg = event.data;
   if (!msg || typeof msg !== "object") return;
 
@@ -75,14 +83,18 @@ self.onmessage = async (event) => {
       const result = JSON.parse(calculate_binary_logistic_timed(X, rows, cols, y, configJson, featureNamesJson));
       const computeMs = performance.now() - t0;
       const [wasmCoreMs, wasmSerializeMs] = last_full_timings();
+      const memoryBytes = wasmMemoryBytes();
+      const tPostEpochMs = epochNow();
       self.postMessage({
         type: "result",
         runId,
         result,
         computeMs,
-        wasmMemoryBytes: wasmMemoryBytes(),
+        wasmMemoryBytes: memoryBytes,
         wasmCoreMs,
         wasmSerializeMs,
+        tRecvEpochMs,
+        tPostEpochMs,
       });
     } catch (err) {
       self.postMessage({ type: "error", runId, message: errorMessage(err) });
@@ -97,12 +109,16 @@ self.onmessage = async (event) => {
       const t0 = performance.now();
       const result = irls_core_bench(X, n, p, y, maxIter, tol);
       const computeMs = performance.now() - t0;
+      const memoryBytes = wasmMemoryBytes();
+      const tPostEpochMs = epochNow();
       self.postMessage({
         type: "result",
         runId,
         result,
         computeMs,
-        wasmMemoryBytes: wasmMemoryBytes(),
+        wasmMemoryBytes: memoryBytes,
+        tRecvEpochMs,
+        tPostEpochMs,
       });
     } catch (err) {
       self.postMessage({ type: "error", runId, message: errorMessage(err) });

@@ -11,10 +11,11 @@ import path from "node:path";
  * Analisis: reproducibility/ (REPRODUCE.md) atau scripts/compareWorkloads.mjs.
  *
  * Setiap entri EXPERIMENT_BENCH_WORKLOADS adalah workload ("core" atau "full"),
- * opsional dengan akhiran ":per-run" (alias ":cold"): centang "Fresh worker per
- * run (cold)" di dialog, yaitu worker baru untuk setiap run (kolom workerStart =
- * cold, coldWorkers = true di meta.json). Tanpa akhiran: worker persistent (warm).
- * Berkas per-run disimpan dengan akhiran "-per-run".
+ * opsional dengan akhiran ":per-run" (alias ":cold"): Worker lifecycle "Per-run"
+ * di dialog, yaitu worker baru untuk setiap run (kolom workerStart = cold,
+ * lifecycle = per-run di meta.json). Tanpa akhiran: worker persistent (warm).
+ * Berkas per-run disimpan dengan akhiran "-per-run". Runner ini (legacy, v1) selalu
+ * memakai resample + urutan N naik; sesi v2 dijalankan tests/experiment/orchestrate.mjs.
  *
  * Dilewati kecuali EXPERIMENT_BENCH_DATA diisi. Contoh (PowerShell, dari root repo,
  * setelah production build):
@@ -128,14 +129,18 @@ test("benchmark: workloads and worker lifecycles with identical settings", async
 
   await page.getByTestId("bl-exp-warmup").fill(WARMUP);
   await page.getByTestId("bl-exp-repetitions").fill(REPETITIONS);
-  await page.getByTestId("bl-exp-seed").fill(SEED);
+  // Batch v1: resample dengan pengembalian, N naik, satu seed untuk data dan urutan
+  await page.getByTestId("bl-exp-sampling-resample").click();
+  await page.getByTestId("bl-exp-size-order-ascending").click();
+  await page.getByTestId("bl-exp-data-seed").fill(SEED);
+  await page.getByTestId("bl-exp-order-seed").fill(SEED);
 
   for (const { workload, perRun } of BATCHES) {
     await page.getByTestId(`bl-exp-workload-${workload}`).click();
-    // Siklus hidup worker: checkbox "Fresh worker per run (cold)" = per-run
-    const cold = page.getByTestId("bl-exp-cold-workers");
-    if ((await cold.isChecked()) !== perRun) await cold.click();
-    await expect(cold).toBeChecked({ checked: perRun });
+    // Siklus hidup worker batch: persistent atau per-run (v1 tidak punya interleaved)
+    const lifecycle = page.getByTestId(`bl-exp-lifecycle-${perRun ? "per-run" : "persistent"}`);
+    await lifecycle.click();
+    await expect(lifecycle).toBeChecked();
     const started = Date.now();
     await page.getByTestId("bl-exp-run-batch").click();
     const result = page.locator(`[data-testid="bl-exp-batch-result"][data-workload="${workload}"]`);

@@ -2,9 +2,14 @@
  * Ekspor hasil batch: CSV (satu baris per run, metadata lingkungan di tiap
  * baris) dan meta.json (pengaturan, lingkungan, urutan acak, ringkasan).
  * Format mesin: pemisah koma, desimal titik, angka presisi penuh.
+ *
+ * Urutan kolom v1 tidak berubah; kolom v2 ditambahkan di BELAKANG (setelah
+ * batchStartedAt), sehingga skrip analisis v1 tetap bisa membaca berkas baru.
  */
 import type { AccuracyRow, BatchMeta, ModeSummary, RunRecord } from "../types/experiment";
-import { MODES, REFERENCE_MODE } from "../types/experiment";
+import { MODES } from "../types/experiment";
+import { referenceRecord } from "./analysis";
+import { legacyColdWorkers } from "./settings";
 
 type Cell = string | number | boolean | null | undefined;
 
@@ -17,11 +22,15 @@ export function csvEscape(value: Cell): string {
 
 export function buildRunsCsv(records: RunRecord[], meta: BatchMeta, featureNames: string[]): string {
   const env = meta.environment;
-  // Workload "full": acuan tabel SPSS = run sukses pertama mode D pada N yang sama
+  const s = meta.settings;
+  // Workload "full": acuan tabel SPSS = run sukses pertama D-warm (atau D-cold) pada N yang sama
   const refHash = new Map<number, string>();
-  for (const r of records) {
-    if (r.mode === REFERENCE_MODE && r.tablesHash !== null && r.error === null && !refHash.has(r.N)) refHash.set(r.N, r.tablesHash);
+  for (const N of new Set(records.map((r) => r.N))) {
+    const ref = referenceRecord(records.filter((r) => r.N === N));
+    if (ref && ref.tablesHash !== null) refHash.set(N, ref.tablesHash);
   }
+  const sizeOrderIndex = new Map((meta.sizeOrderUsed ?? []).map((N, i) => [N, i + 1]));
+  const session = meta.session ?? null;
   const runCols: [string, (r: RunRecord) => Cell][] = [
     ["batchId", (r) => r.batchId],
     ["workload", (r) => r.workload],
@@ -68,10 +77,12 @@ export function buildRunsCsv(records: RunRecord[], meta: BatchMeta, featureNames
   ];
   const envValues: [string, Cell][] = [
     ["error", null], // diisi per baris di bawah
-    ["seed", meta.settings.seed],
-    ["warmup", meta.settings.warmup],
-    ["repetitions", meta.settings.repetitions],
-    ["coldWorkers", meta.settings.coldWorkers],
+    // v1: satu seed untuk resampling dan urutan; v2: seed data (lihat juga dataSeed/orderSeed)
+    ["seed", s.dataSeed],
+    ["warmup", s.warmup],
+    ["repetitions", s.repetitions],
+    // v1: pengaturan batch; kosong untuk batch interleaved (lihat lifecycle dan workerStart)
+    ["coldWorkers", legacyColdWorkers(s.lifecycle)],
     ["maxIter", meta.settings.maxIter],
     ["tol", meta.settings.tol],
     ["dependent", meta.dataset.dependent],
@@ -97,14 +108,48 @@ export function buildRunsCsv(records: RunRecord[], meta: BatchMeta, featureNames
     ["gitCommit", env.gitCommit],
     ["batchStartedAt", meta.startedAt],
   ];
+  // --- Kolom v2, di belakang semua kolom v1 ---
+  const v2Cols: [string, (r: RunRecord) => Cell][] = [
+    // Tugas 3: sampling dan seed
+    ["sampling", () => s.sampling],
+    ["dataSeed", () => s.dataSeed],
+    ["orderSeed", () => s.orderSeed],
+    ["sizeOrder", () => s.sizeOrder],
+    ["sizeOrderIndex", (r) => sizeOrderIndex.get(r.N) ?? null],
+    // Tugas 4: sel dan start-up per-run
+    ["cell", (r) => r.cell],
+    ["lifecycle", () => s.lifecycle],
+    ["spawnMaxFrameGapMs", (r) => r.spawnMaxFrameGapMs],
+    ["spawnDroppedFrames", (r) => r.spawnDroppedFrames],
+    ["spawnLongTaskCount", (r) => r.spawnLongTaskCount],
+    // Tugas 5: rincian overhead worker, fase frame, sesi, browser
+    ["dispatchLatencyMs", (r) => r.dispatchLatencyMs],
+    ["returnLatencyMs", (r) => r.returnLatencyMs],
+    ["workerHandlerMs", (r) => r.workerHandlerMs],
+    ["clockCheckFailed", (r) => r.clockCheckFailed],
+    ["t0PhaseMs", (r) => r.t0PhaseMs],
+    ["t1PhaseMs", (r) => r.t1PhaseMs],
+    ["nextFrameAfterT1Ms", (r) => r.nextFrameAfterT1Ms],
+    ["sessionId", () => session?.id ?? null],
+    ["sessionIndex", () => session?.index ?? null],
+    ["sessionRole", () => session?.role ?? null],
+    ["browserName", () => env.browserName ?? null],
+    ["browserVersion", () => env.browserVersion ?? null],
+  ];
 
-  const header = [...runCols.map((c) => c[0]), ...coefCols.map((c) => c[0]), ...envValues.map((c) => c[0])];
+  const header = [
+    ...runCols.map((c) => c[0]),
+    ...coefCols.map((c) => c[0]),
+    ...envValues.map((c) => c[0]),
+    ...v2Cols.map((c) => c[0]),
+  ];
   const lines = [header.map(csvEscape).join(",")];
   for (const r of records) {
     const cells: Cell[] = [
       ...runCols.map(([, get]) => get(r)),
       ...coefCols.map(([, get]) => get(r)),
       ...envValues.map(([key, v]) => (key === "error" ? r.error : v)),
+      ...v2Cols.map(([, get]) => get(r)),
     ];
     lines.push(cells.map(csvEscape).join(","));
   }

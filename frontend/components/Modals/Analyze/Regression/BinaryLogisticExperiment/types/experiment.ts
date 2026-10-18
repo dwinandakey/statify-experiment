@@ -25,6 +25,81 @@ export const MODE_ORDER: ExperimentMode[] = ["A", "B", "C", "D"];
 // Acuan validasi akurasi antar mode (konfigurasi produksi Statify)
 export const REFERENCE_MODE: ExperimentMode = "D";
 
+// --- Sel desain v2: mode × siklus hidup worker ---
+
+/**
+ * Siklus hidup worker dalam batch:
+ * - "persistent": 4 sel (A, B-warm, C, D-warm), worker dibuat sekali sebelum pengukuran;
+ * - "per-run": 4 sel (A, B-cold, C, D-cold), worker baru untuk setiap run;
+ * - "interleaved": 6 sel (A, B-warm, B-cold, C, D-warm, D-cold) di setiap repetisi.
+ */
+export type Lifecycle = "persistent" | "per-run" | "interleaved";
+
+export const LIFECYCLE_LABEL: Record<Lifecycle, string> = {
+  persistent: "Persistent",
+  "per-run": "Per-run",
+  interleaved: "Interleaved",
+};
+
+export type CellId = "A" | "B-warm" | "B-cold" | "C" | "D-warm" | "D-cold";
+
+export interface Cell {
+  id: CellId;
+  mode: ExperimentMode;
+  /** null untuk mode main thread (A, C). */
+  workerStart: WorkerStart | null;
+}
+
+export const CELLS: Record<CellId, Cell> = {
+  A: { id: "A", mode: "A", workerStart: null },
+  "B-warm": { id: "B-warm", mode: "B", workerStart: "warm" },
+  "B-cold": { id: "B-cold", mode: "B", workerStart: "cold" },
+  C: { id: "C", mode: "C", workerStart: null },
+  "D-warm": { id: "D-warm", mode: "D", workerStart: "warm" },
+  "D-cold": { id: "D-cold", mode: "D", workerStart: "cold" },
+};
+
+/**
+ * Urutan kanonik sel sebelum diacak. Untuk persistent/per-run hasilnya A, B, C, D seperti
+ * MODE_ORDER v1, jadi urutan acak per repetisi identik dengan v1 untuk orderSeed = seed v1.
+ */
+export const CELL_ORDER: CellId[] = ["A", "B-warm", "B-cold", "C", "D-warm", "D-cold"];
+
+export function cellsFor(lifecycle: Lifecycle): Cell[] {
+  return CELL_ORDER.map((id) => CELLS[id]).filter(
+    (c) => c.workerStart === null || lifecycle === "interleaved" || c.workerStart === (lifecycle === "per-run" ? "cold" : "warm")
+  );
+}
+
+/** Sel untuk satu run (Run once, OK, atau baris CSV lama tanpa kolom cell). */
+export function cellFor(mode: ExperimentMode, cold: boolean): Cell {
+  if (MODES[mode].location === "main") return CELLS[mode as "A" | "C"];
+  return CELLS[`${mode}-${cold ? "cold" : "warm"}` as CellId];
+}
+
+export function cellLabel(id: CellId): string {
+  const c = CELLS[id];
+  return c.workerStart ? `${MODES[c.mode].label} (${c.workerStart === "warm" ? "persistent" : "per-run"})` : MODES[c.mode].label;
+}
+
+/**
+ * Acuan validasi akurasi antar sel: run sukses pertama sel D-warm pada N yang sama
+ * (konfigurasi produksi). Batch per-run tidak punya D-warm, jadi memakai D-cold.
+ */
+export const REFERENCE_CELLS: CellId[] = ["D-warm", "D-cold"];
+
+// --- Sampling dan urutan ---
+
+/**
+ * Pembentukan dataset ukuran N:
+ * - "resample": dengan pengembalian, mulberry32(dataSeed) (perilaku v1);
+ * - "prefix": N baris pertama data yang sudah dipersiapkan, tanpa pengembalian (N ≤ n).
+ */
+export type Sampling = "resample" | "prefix";
+
+/** Urutan ukuran N dalam batch: naik (v1) atau diacak dengan orderSeed. */
+export type SizeOrder = "ascending" | "shuffled";
+
 /**
  * Beban kerja yang diukur:
  * - "core": inti IRLS (B, S.E., −2LL), identik di JS dan Rust (Run once, batch);
@@ -118,8 +193,10 @@ export interface DatasetForRun {
   y: Float64Array;
   n: number;
   p: number;
-  /** false jika N sama dengan N asli (data asli dipakai apa adanya). */
+  /** true hanya untuk sampling "resample" dengan N berbeda dari N asli. */
   resampled: boolean;
+  /** "original" bila N = N asli (data dipakai apa adanya), selain itu cara sampling-nya. */
+  sampling: "original" | Sampling;
 }
 
 // --- Metrik per run ---
@@ -154,6 +231,31 @@ export interface RunMetrics {
   wasmSerializeMs: number | null;
   /** Tab tersembunyi kapan pun selama run (rAF berhenti → metrik frame tidak valid). */
   pageHidden: boolean;
+  /**
+   * Sel cold: responsivitas main thread selama start-up worker, diukur FrameMonitor kedua dari
+   * tepat sebelum `new Worker` sampai worker siap (termasuk init_full), di luar jendela ukur.
+   * null untuk sel lain.
+   */
+  spawnMaxFrameGapMs: number | null;
+  spawnDroppedFrames: number | null;
+  /** null juga bila longtask tidak didukung (Firefox). */
+  spawnLongTaskCount: number | null;
+  /**
+   * Mode worker: rincian overheadMs dari stempel epoch (performance.timeOrigin + now()) di main
+   * thread dan worker. dispatch = tRecv − t0, return = t1 − tPost, handler = tPost − tRecv.
+   * null untuk mode main.
+   */
+  dispatchLatencyMs: number | null;
+  returnLatencyMs: number | null;
+  workerHandlerMs: number | null;
+  /** true bila salah satu dari tiga nilai di atas < −0,05 ms (jam antarkonteks tidak konsisten). */
+  clockCheckFailed: boolean | null;
+  /** Fase frame dari stempel rAF FrameMonitor: t0 − rAF terakhir ≤ t0. */
+  t0PhaseMs: number | null;
+  /** t1 − rAF terakhir ≤ t1. */
+  t1PhaseMs: number | null;
+  /** rAF pertama > t1 dikurangi t1. */
+  nextFrameAfterT1Ms: number | null;
 }
 
 export interface RunRecord extends RunMetrics {
@@ -166,10 +268,12 @@ export interface RunRecord extends RunMetrics {
   p: number;
   /** Ulangan ke- (1-based); 0 untuk Run once. */
   rep: number;
-  /** Posisi mode dalam urutan acak ulangan tersebut (1..4). */
+  /** Posisi sel dalam urutan acak ulangan tersebut (1..4, atau 1..6 untuk interleaved). */
   orderInRep: number;
   mode: ExperimentMode;
   workerStart: WorkerStart | null;
+  /** Sel desain: mode + siklus hidup worker. */
+  cell: CellId;
   /** Workload "full": pemuatan mesin analisis lengkap sebelum timer (≈ 0 bila sudah dimuat). */
   engineInitMs: number | null;
   /** Workload "full": formatter SPSS produksi di main thread, di dalam jendela ukur. */
@@ -195,6 +299,7 @@ export interface FullRunRecord extends RunMetrics {
   rows: number;
   cols: number;
   workerStart: WorkerStart | null;
+  cell: CellId;
   /** Worker baru dibuat untuk run ini (cold, atau warm pertama kali). */
   workerCreated: boolean;
   /** Pemuatan mesin analisis lengkap di luar timer (import logistic_enter.js / wasm init). */
@@ -221,8 +326,14 @@ export interface BatchSettings {
   sizes: number[];
   warmup: number;
   repetitions: number;
-  seed: number;
-  coldWorkers: boolean;
+  /** Seed resampling; hanya dipakai sampling "resample". Menggantikan `seed` v1. */
+  dataSeed: number;
+  /** Seed urutan sel per repetisi, urutan N ("shuffled"), dan urutan workload (orkestrator). */
+  orderSeed: number;
+  sampling: Sampling;
+  sizeOrder: SizeOrder;
+  /** Menggantikan `coldWorkers` v1 (true → "per-run", false → "persistent"). */
+  lifecycle: Lifecycle;
   maxIter: number;
   tol: number;
 }
@@ -261,6 +372,7 @@ export interface EnvironmentMeta {
   deviceMemory: number | null;
   crossOriginIsolated: boolean;
   buildMode: string;
+  /** `git describe --always --dirty --abbrev=8` saat build (akhiran -dirty bila working tree berubah). */
   gitCommit: string | null;
   /** Estimasi interval refresh layar (median gap rAF saat idle). */
   refreshIntervalMs: number | null;
@@ -269,6 +381,42 @@ export interface EnvironmentMeta {
   longTaskSupported: boolean;
   memoryApiSupported: boolean;
   capturedAt: string;
+  /** "chrome", "edge", "chromium", "firefox", atau "unknown". */
+  browserName: string;
+  /** Versi lengkap: Chromium dari userAgentData.fullVersionList, Firefox dari UA "Firefox/x.y". */
+  browserVersion: string | null;
+  /** navigator.userAgentData.getHighEntropyValues (Chromium); null di Firefox. */
+  uaHighEntropy: {
+    fullVersionList?: { brand: string; version: string }[];
+    platformVersion?: string;
+    architecture?: string;
+    bitness?: string;
+  } | null;
+  webdriver: boolean | null;
+  /** document.hasFocus() dan visibilityState di awal batch dan (diisi setelah batch) di akhir. */
+  hasFocusStart: boolean | null;
+  visibilityStart: string | null;
+  hasFocusEnd: boolean | null;
+  visibilityEnd: string | null;
+  devicePixelRatio: number | null;
+  innerWidth: number | null;
+  innerHeight: number | null;
+  /** navigator.getBattery() (Chromium); null bila tidak ada. */
+  battery: { charging: boolean; level: number } | null;
+  /** Isi `files` ARTIFACT_HASHES.json yang disajikan bersama build. */
+  artifactHashes: Record<string, { bytes: number; sha256: string }> | null;
+  /** SHA-256 .wasm yang di-fetch saat batch dimulai (crypto.subtle). */
+  wasmSha256Runtime: string | null;
+  /** wasmSha256Runtime sama dengan ARTIFACT_HASHES.json; null bila salah satunya tidak tersedia. */
+  wasmHashVerified: boolean | null;
+}
+
+/** Info sesi dari query URL (expSession, expSessionIndex, expRole, expBrowser), diisi orkestrator. */
+export interface SessionInfo {
+  id: string | null;
+  index: number | null;
+  role: "pilot" | "measure" | null;
+  browser: string | null;
 }
 
 export interface BatchMeta {
@@ -290,8 +438,12 @@ export interface BatchMeta {
     /** Kolom kovariat mentah (input analisis lengkap). */
     cols: number;
   };
-  /** Urutan mode yang dipakai tiap (N, ulangan); untuk audit pengacakan. */
-  orders: { N: number; rep: number; order: ExperimentMode[] }[];
+  /** Urutan ukuran N yang benar-benar dipakai (naik, atau diacak dengan orderSeed). */
+  sizeOrderUsed: number[];
+  /** Urutan sel yang dipakai tiap (N, ulangan); untuk audit pengacakan. */
+  orders: { N: number; rep: number; order: CellId[] }[];
+  /** Info sesi orkestrator dari query URL; null untuk batch manual. */
+  session: SessionInfo | null;
 }
 
 // --- Ringkasan ---
@@ -309,6 +461,7 @@ export interface SummaryStats {
 export interface ModeSummary {
   N: number;
   mode: ExperimentMode;
+  cell: CellId;
   runs: number;
   errors: number;
   computeMs: SummaryStats | null;
@@ -324,14 +477,17 @@ export interface ModeSummary {
 export interface AccuracyRow {
   N: number;
   mode: ExperimentMode;
-  /** max |beta(mode) - beta(D)| atas semua run mode tsb pada N ini. */
+  cell: CellId;
+  /** Sel acuan (run sukses pertama D-warm, atau D-cold untuk batch per-run). */
+  referenceCell: CellId;
+  /** max |beta(sel) - beta(acuan)| atas semua run sel tsb pada N ini. */
   maxAbsDiffBeta: number;
   maxAbsDiffSe: number;
   /** max |Δ| / max(1, |nilai|) atas B dan S.E. (kriteria workload "full"). */
   maxScaledDiff: number;
   iterations: number | null;
   stepHalvings: number | null;
-  /** Workload "full": run yang tabel SPSS-nya identik dengan run pertama mode D. */
+  /** Workload "full": run yang tabel SPSS-nya identik dengan run acuan. */
   tablesIdentical: { identical: number; total: number } | null;
 }
 
@@ -371,6 +527,7 @@ export interface SingleRunResult {
   record: RunRecord;
   featureNames: string[];
   resampled: boolean;
+  sampling: DatasetForRun["sampling"];
   nOriginal: number;
 }
 

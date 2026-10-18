@@ -1,9 +1,11 @@
 /**
  * Unit test fungsi murni runner/metrik eksperimen Binary Logistic:
- * kuantil & ringkasan, statistik frame, akurasi antar mode, CSV, dan
+ * kuantil & ringkasan, statistik frame, akurasi antar sel, CSV, dan
  * pemetaan Constant ↔ intercept pada pembanding produksi.
  */
-import type { BatchMeta, ExperimentMode, RunRecord } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/types/experiment";
+import fs from "node:fs";
+import path from "node:path";
+import type { BatchMeta, CellId, ExperimentMode, RunRecord } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/types/experiment";
 import { computeFrameStats, quantile, summarize } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/metrics";
 import {
   accuracyPassed,
@@ -20,6 +22,9 @@ import { totalBatchRuns, validateSettings } from "@/components/Modals/Analyze/Re
 jest.mock("@/stores/useDataStore", () => ({ useDataStore: { getState: () => ({ data: [] }) } }));
 jest.mock("@/stores/useVariableStore", () => ({ useVariableStore: { getState: () => ({ variables: [] }) } }));
 
+/** Sel default per mode: A, B-warm, C, D-warm (batch persistent). */
+const DEFAULT_CELL: Record<ExperimentMode, CellId> = { A: "A", B: "B-warm", C: "C", D: "D-warm" };
+
 function rec(mode: ExperimentMode, N: number, e2eMs: number, beta: number[], extra: Partial<RunRecord> = {}): RunRecord {
   return {
     batchId: "b",
@@ -31,7 +36,8 @@ function rec(mode: ExperimentMode, N: number, e2eMs: number, beta: number[], ext
     rep: 1,
     orderInRep: 1,
     mode,
-    workerStart: null,
+    workerStart: mode === "B" || mode === "D" ? "warm" : null,
+    cell: DEFAULT_CELL[mode],
     computeMs: e2eMs,
     e2eMs,
     overheadMs: 0,
@@ -52,6 +58,16 @@ function rec(mode: ExperimentMode, N: number, e2eMs: number, beta: number[], ext
     wasmMemoryMB: null,
     wasmSerializeMs: null,
     pageHidden: false,
+    spawnMaxFrameGapMs: null,
+    spawnDroppedFrames: null,
+    spawnLongTaskCount: null,
+    dispatchLatencyMs: null,
+    returnLatencyMs: null,
+    workerHandlerMs: null,
+    clockCheckFailed: null,
+    t0PhaseMs: null,
+    t1PhaseMs: null,
+    nextFrameAfterT1Ms: null,
     result: { beta, se: beta.map((b) => Math.abs(b) / 10), neg2ll: 100, iterations: 4, converged: true, stepHalvings: 0, wasmCoreMs: null },
     error: null,
     timestamp: "2026-10-16T00:00:00.000Z",
@@ -218,7 +234,7 @@ describe("CSV", () => {
     const meta = {
       batchId: "batch-1",
       startedAt: "2026-10-16T00:00:00.000Z",
-      settings: { sizes: [100], warmup: 1, repetitions: 2, seed: 7, coldWorkers: false, maxIter: 20, tol: 0.001 },
+      settings: { sizes: [100], warmup: 1, repetitions: 2, dataSeed: 7, orderSeed: 8, sampling: "resample", sizeOrder: "ascending", lifecycle: "persistent", maxIter: 20, tol: 0.001 },
       environment: {
         userAgent: "UA, test",
         hardwareConcurrency: 8,
@@ -255,7 +271,7 @@ describe("CSV", () => {
     const meta = {
       batchId: "batch-full-1",
       startedAt: "x",
-      settings: { workload: "full", sizes: [100], warmup: 0, repetitions: 1, seed: 1, coldWorkers: false, maxIter: 20, tol: 0.001 },
+      settings: { workload: "full", sizes: [100], warmup: 0, repetitions: 1, dataSeed: 1, orderSeed: 1, sampling: "prefix", sizeOrder: "ascending", lifecycle: "persistent", maxIter: 20, tol: 0.001 },
       environment: { userAgent: "UA" },
       mainThreadInit: { jsImportMs: null, enterImportMs: 4, wasmImportMs: 2, wasmInitMs: 3 },
       warmWorkerInit: { B: { spawnMs: 4, initMs: 0, engineInitMs: 1.5 } },
@@ -273,6 +289,104 @@ describe("CSV", () => {
     expect([col(1, "tablesIdenticalToD"), col(2, "tablesIdenticalToD"), col(3, "tablesIdenticalToD")]).toEqual(["false", "true", "true"]);
     expect(col(1, "mainEnterImportMs")).toBe("4");
     expect(col(1, "warmEngineInitMsB")).toBe("1.5");
+  });
+});
+
+describe("sel interleaved (6 sel per repetisi)", () => {
+  const cell = (c: CellId, mode: ExperimentMode, N: number, e2eMs: number, beta: number[], extra: Partial<RunRecord> = {}) =>
+    rec(mode, N, e2eMs, beta, { cell: c, workerStart: c.endsWith("cold") ? "cold" : c.endsWith("warm") ? "warm" : null, ...extra });
+  const records = [
+    // D-cold muncul lebih dulu, tetapi acuan tetap D-warm
+    cell("D-cold", "D", 100, 9, [0.5, 1.2 + 2e-12]),
+    cell("D-warm", "D", 100, 6, [0.5, 1.2]),
+    cell("B-warm", "B", 100, 10, [0.5, 1.2]),
+    cell("B-cold", "B", 100, 40, [0.5, 1.2]),
+    cell("A", "A", 100, 12, [0.5, 1.2]),
+    cell("C", "C", 100, 8, [0.5, 1.2]),
+  ];
+
+  test("ringkasan per (N, sel): B-warm dan B-cold terpisah, urutan kanonik", () => {
+    const s = computeSummaries(records);
+    expect(s.map((x) => x.cell)).toEqual(["A", "B-warm", "B-cold", "C", "D-warm", "D-cold"]);
+    expect(s.find((x) => x.cell === "B-cold")!.e2eMs!.median).toBe(40);
+    expect(s.find((x) => x.cell === "B-warm")!.mode).toBe("B");
+  });
+
+  test("akurasi terhadap run sukses pertama D-warm; batch per-run memakai D-cold", () => {
+    const acc = computeAccuracy(records);
+    expect(new Set(acc.map((a) => a.referenceCell))).toEqual(new Set(["D-warm"]));
+    expect(acc.find((a) => a.cell === "D-warm")!.maxAbsDiffBeta).toBe(0);
+    expect(acc.find((a) => a.cell === "D-cold")!.maxAbsDiffBeta).toBeGreaterThan(0);
+    const perRun = computeAccuracy(records.filter((r) => r.cell !== "D-warm" && r.cell !== "B-warm"));
+    expect(new Set(perRun.map((a) => a.referenceCell))).toEqual(new Set(["D-cold"]));
+    expect(perRun.find((a) => a.cell === "D-cold")!.maxAbsDiffBeta).toBe(0);
+  });
+});
+
+describe("CSV v2: kompatibel dengan v1, kolom baru di belakang", () => {
+  const v1Csv = path.join(__dirname, "../../reproducibility/data/core_warm.csv");
+  const v1Header = fs.readFileSync(v1Csv, "utf8").split(/\r?\n/)[0].split(",");
+  const featureNames = v1Header.filter((h) => h.startsWith("B_")).map((h) => h.slice(2));
+  const meta = (lifecycle: "persistent" | "per-run" | "interleaved", workload: "core" | "full" = "core") =>
+    ({
+      batchId: "b",
+      startedAt: "x",
+      settings: { workload, sizes: [100, 50], warmup: 0, repetitions: 1, dataSeed: 3, orderSeed: 1004, sampling: "prefix", sizeOrder: "shuffled", lifecycle, maxIter: 20, tol: 0.001 },
+      environment: { userAgent: "UA", browserName: "firefox", browserVersion: "158.0" },
+      mainThreadInit: {},
+      warmWorkerInit: {},
+      dataset: { dependent: "y", covariates: ["x"], nOriginal: 100, nTotalRows: 100, nMissing: 0, p: 2, cols: 1 },
+      sizeOrderUsed: [100, 50],
+      orders: [],
+      session: { id: "chrome-01", index: 3, role: "measure", browser: "chrome" },
+    }) as unknown as BatchMeta;
+  const beta = featureNames.map(() => 0.1);
+  const parse = (csv: string) => {
+    const lines = csv.trim().split("\r\n").map((l) => l.split(","));
+    const header = lines[0];
+    return { header, rows: lines.slice(1), col: (row: string[], name: string) => row[header.indexOf(name)] };
+  };
+
+  test("header diawali persis oleh header CSV v1 (reproducibility/data/core_warm.csv)", () => {
+    const { header } = parse(buildRunsCsv([rec("A", 100, 10, beta)], meta("persistent"), featureNames));
+    expect(header.slice(0, v1Header.length)).toEqual(v1Header);
+    expect(header.slice(v1Header.length)).toEqual([
+      "sampling", "dataSeed", "orderSeed", "sizeOrder", "sizeOrderIndex",
+      "cell", "lifecycle", "spawnMaxFrameGapMs", "spawnDroppedFrames", "spawnLongTaskCount",
+      "dispatchLatencyMs", "returnLatencyMs", "workerHandlerMs", "clockCheckFailed",
+      "t0PhaseMs", "t1PhaseMs", "nextFrameAfterT1Ms",
+      "sessionId", "sessionIndex", "sessionRole", "browserName", "browserVersion",
+    ]);
+  });
+
+  test("seed = dataSeed; coldWorkers = pengaturan batch v1, kosong untuk interleaved; kolom sel, sesi, browser", () => {
+    const r = rec("B", 50, 10, beta, { cell: "B-cold", workerStart: "cold", orderInRep: 6, spawnMaxFrameGapMs: 21.5, clockCheckFailed: false });
+    for (const [lifecycle, cold] of [["persistent", "false"], ["per-run", "true"], ["interleaved", ""]] as const) {
+      const { rows, col } = parse(buildRunsCsv([r], meta(lifecycle), featureNames));
+      expect(col(rows[0], "coldWorkers")).toBe(cold);
+      expect(col(rows[0], "lifecycle")).toBe(lifecycle);
+    }
+    const { rows, col } = parse(buildRunsCsv([r], meta("interleaved"), featureNames));
+    expect(col(rows[0], "seed")).toBe("3");
+    expect(col(rows[0], "dataSeed")).toBe("3");
+    expect(col(rows[0], "orderSeed")).toBe("1004");
+    expect(col(rows[0], "sizeOrderIndex")).toBe("2"); // N = 50 kedua di sizeOrderUsed [100, 50]
+    expect(col(rows[0], "cell")).toBe("B-cold");
+    expect(col(rows[0], "workerStart")).toBe("cold");
+    expect(col(rows[0], "orderInRep")).toBe("6");
+    expect(col(rows[0], "spawnMaxFrameGapMs")).toBe("21.5");
+    expect(col(rows[0], "clockCheckFailed")).toBe("false");
+    expect(col(rows[0], "dispatchLatencyMs")).toBe("");
+    expect([col(rows[0], "sessionId"), col(rows[0], "sessionIndex"), col(rows[0], "sessionRole")]).toEqual(["chrome-01", "3", "measure"]);
+    expect([col(rows[0], "browserName"), col(rows[0], "browserVersion")]).toEqual(["firefox", "158.0"]);
+  });
+
+  test("tablesIdenticalToD mengacu ke run sukses pertama D-warm, bukan D-cold yang lebih dulu", () => {
+    const full = (c: CellId, mode: ExperimentMode, hash: string) =>
+      rec(mode, 100, 10, beta, { cell: c, workload: "full", formatMs: 1, totalMs: 11, tablesHash: hash });
+    const csv = buildRunsCsv([full("D-cold", "D", "hX"), full("D-warm", "D", "h1"), full("A", "A", "h1")], meta("interleaved", "full"), featureNames);
+    const { rows, col } = parse(csv);
+    expect(rows.map((r) => col(r, "tablesIdenticalToD"))).toEqual(["false", "true", "true"]);
   });
 });
 
@@ -325,14 +439,32 @@ describe("compareWithProduction", () => {
 });
 
 describe("validasi pengaturan batch", () => {
-  const base = { workload: "core" as const, sizes: [100, 1000], warmup: 5, repetitions: 30, seed: 1, coldWorkers: false, maxIter: 20, tol: 0.001 };
-  test("jumlah run total = |N| × (warm-up + ulangan) × 4", () => {
+  const base = {
+    workload: "core" as const,
+    sizes: [100, 1000],
+    warmup: 5,
+    repetitions: 30,
+    dataSeed: 1,
+    orderSeed: 2,
+    sampling: "prefix" as const,
+    sizeOrder: "shuffled" as const,
+    lifecycle: "persistent" as const,
+    maxIter: 20,
+    tol: 0.001,
+  };
+  test("jumlah run total = |N| × (warm-up + ulangan) × jumlah sel (4, atau 6 untuk interleaved)", () => {
     expect(totalBatchRuns(base)).toBe(2 * 35 * 4);
+    expect(totalBatchRuns({ ...base, lifecycle: "per-run" })).toBe(2 * 35 * 4);
+    expect(totalBatchRuns({ ...base, lifecycle: "interleaved" })).toBe(2 * 35 * 6);
   });
   test("nilai tidak valid ditolak", () => {
     expect(() => validateSettings(base)).not.toThrow();
     expect(() => validateSettings({ ...base, sizes: [] })).toThrow(/at least one/);
     expect(() => validateSettings({ ...base, repetitions: 0 })).toThrow(/Repetitions/);
-    expect(() => validateSettings({ ...base, seed: 1.5 })).toThrow(/Seed/);
+    expect(() => validateSettings({ ...base, dataSeed: 1.5 })).toThrow(/Data seed/);
+    expect(() => validateSettings({ ...base, orderSeed: NaN })).toThrow(/Order seed/);
+    expect(() => validateSettings({ ...base, sampling: "bootstrap" as never })).toThrow(/sampling/);
+    expect(() => validateSettings({ ...base, sizeOrder: "random" as never })).toThrow(/size order/);
+    expect(() => validateSettings({ ...base, lifecycle: "cold" as never })).toThrow(/lifecycle/);
   });
 });

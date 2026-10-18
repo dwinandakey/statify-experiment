@@ -15,6 +15,12 @@
  *   lengkap per mode, lalu formatter tabel SPSS produksi di main thread, masih
  *   di dalam jendela ukur (formatMs, totalMs). Tabel batch hanya di-hash untuk
  *   validasi lalu dibuang; tidak ada yang ditulis ke output viewer.
+ * - Eksperimen v2: setiap run adalah satu SEL (mode + siklus hidup worker). Batch
+ *   "interleaved" mengacak 6 sel per repetisi (A, B-warm, B-cold, C, D-warm, D-cold);
+ *   worker persistent dibuat sebelum pengukuran, worker per-run dibuat per run sebelum
+ *   timer. Untuk sel cold, FrameMonitor kedua mengukur responsivitas selama start-up
+ *   worker (spawn*), di luar jendela ukur. Metrik tambahan (fase frame, rincian latensi
+ *   worker) dihitung SETELAH jendela ukur dari stempel yang sudah ada.
  */
 import type { BinaryLogisticOutput } from "@/components/Modals/Analyze/Regression/BinaryLogistic/types/binary-logistic";
 import type {
@@ -22,6 +28,7 @@ import type {
   BatchOutcome,
   BatchProgress,
   BatchSettings,
+  Cell,
   CoreResult,
   DatasetForRun,
   ExperimentMode,
@@ -29,24 +36,30 @@ import type {
   FullRunRecord,
   InitTimings,
   PreparedData,
+  RunMetrics,
   RunRecord,
   WarmWorkerInit,
 } from "../types/experiment";
-import { DEFAULT_MAX_ITER, DEFAULT_TOL, MODES, MODE_ORDER } from "../types/experiment";
+import { DEFAULT_MAX_ITER, DEFAULT_TOL, MODES, cellFor, cellsFor } from "../types/experiment";
 import {
   FrameMonitor,
+  type FramePhases,
   type FrameStats,
   LongTaskCollector,
   bytesToMB,
   captureEnvironment,
+  captureEnvironmentEnd,
+  computeFramePhases,
   estimateRefreshInterval,
   interRunPause,
   mainHeapUsedMB,
   nextTask,
   sanitizeFrameInterval,
+  workerLatencies,
 } from "./metrics";
-import { resample, resampleFull } from "./prepareData";
-import { deriveSeed, mulberry32, shuffleInPlace } from "./prng";
+import { checkSizes, sampleDataset, sampleFull } from "./prepareData";
+import { cellOrderRng, shuffleInPlace, shuffledSizes } from "./prng";
+import { readSessionInfo } from "./automation";
 import { coefficientsFromResult, formatSpssTables, spssTablesHash, stepHalvingsFromResult } from "./spssFormat";
 
 // Modul di /public, dimuat browser apa adanya (tanpa webpack/SWC). Specifier
@@ -301,6 +314,13 @@ interface Timed<T> {
   wasmMemoryBytes: number | null;
   /** Mode D workload full: dikirim worker bersama hasil. */
   wasmTimings?: WasmFullTimings | null;
+  /** Mode worker: stempel epoch (timeOrigin + now) penerimaan pesan run dan pengiriman hasil. */
+  workerEpochs?: WorkerEpochs | null;
+}
+
+interface WorkerEpochs {
+  recvEpochMs: number;
+  postEpochMs: number;
 }
 
 /**
@@ -331,7 +351,11 @@ function runOnWorker<T>(
       if (m.type === "result") {
         const wasmTimings =
           typeof m.wasmCoreMs === "number" ? { analysisMs: m.wasmCoreMs, serializeMs: m.wasmSerializeMs } : null;
-        resolve({ t0, t1, computeMs: m.computeMs, raw: m.result, wasmMemoryBytes: m.wasmMemoryBytes ?? null, wasmTimings });
+        const workerEpochs =
+          typeof m.tRecvEpochMs === "number" && typeof m.tPostEpochMs === "number"
+            ? { recvEpochMs: m.tRecvEpochMs, postEpochMs: m.tPostEpochMs }
+            : null;
+        resolve({ t0, t1, computeMs: m.computeMs, raw: m.result, wasmMemoryBytes: m.wasmMemoryBytes ?? null, wasmTimings, workerEpochs });
       } else {
         reject(new Error(m.message || "Worker error"));
       }
@@ -400,29 +424,20 @@ function ensureVisibilityListener(): void {
 
 export interface RunEnv {
   monitor: FrameMonitor;
+  /** Monitor kedua: responsivitas selama start-up worker per-run (sel cold), di luar jendela ukur. */
+  spawnMonitor: FrameMonitor;
   longTasks: LongTaskCollector;
   pool: WorkerPool;
-  coldWorkers: boolean;
   maxIter: number;
   tol: number;
   signal?: AbortSignal;
 }
 
-interface PendingRun {
-  mode: ExperimentMode;
-  timestamp: string;
-  spawnMs: number | null;
-  initMs: number | null;
-  t0: number;
-  t1: number;
-  computeMs: number;
-  raw: RawCoreResult | null;
-  error: string | null;
+/** Start-up worker per-run yang dipantau spawnMonitor: [start, end] di jam main thread. */
+interface SpawnWindow {
+  start: number;
+  end: number;
   frames: FrameStats;
-  windowEnd: number;
-  mainHeapUsedMB: number | null;
-  wasmMemoryBytes: number | null;
-  pageHidden: boolean;
 }
 
 interface Measured<T> {
@@ -436,6 +451,17 @@ interface Measured<T> {
   mainHeapUsedMB: number | null;
   wasmMemoryBytes: number | null;
   pageHidden: boolean;
+  /** Dihitung setelah jendela ukur dari stempel rAF yang sudah dicatat monitor. */
+  phases: FramePhases;
+  workerEpochs: WorkerEpochs | null;
+}
+
+interface PendingRun extends Measured<RawCoreResult> {
+  cell: Cell;
+  timestamp: string;
+  spawnMs: number | null;
+  initMs: number | null;
+  spawn: SpawnWindow | null;
 }
 
 /**
@@ -448,6 +474,7 @@ interface Measured<T> {
  */
 async function measureWindow<T>(
   mode: ExperimentMode,
+  cold: boolean,
   env: RunEnv,
   spawned: SpawnedWorker | null,
   dispatch: () => Promise<Timed<T>>
@@ -464,16 +491,18 @@ async function measureWindow<T>(
   let raw: T | null = null;
   let error: string | null = null;
   let wasmMemoryBytes: number | null = null;
+  let workerEpochs: WorkerEpochs | null = null;
   let abort: unknown = null;
   try {
     const out = await dispatch();
     ({ t0, t1, computeMs, raw, wasmMemoryBytes } = out);
+    workerEpochs = out.workerEpochs ?? null;
   } catch (err) {
     t1 = performance.now();
     error = errorMessage(err);
     if (isAbort(err)) abort = err;
     // Worker yang crash/dibatalkan tidak bisa dipercaya lagi
-    if ((isAbort(err) || err instanceof WorkerFailure) && (mode === "B" || mode === "D") && !env.coldWorkers) {
+    if ((isAbort(err) || err instanceof WorkerFailure) && (mode === "B" || mode === "D") && !cold) {
       env.pool.discard(mode);
     }
   }
@@ -482,7 +511,7 @@ async function measureWindow<T>(
   const frames = await env.monitor.stop();
   const windowEnd = performance.now();
   const heap = mainHeapUsedMB();
-  if (env.coldWorkers && spawned) spawned.worker.terminate();
+  if (cold && spawned) spawned.worker.terminate();
   if (abort) throw abort;
 
   return {
@@ -496,7 +525,30 @@ async function measureWindow<T>(
     mainHeapUsedMB: heap,
     wasmMemoryBytes,
     pageHidden: hiddenAtStart || document.hidden || visibilityChanges !== visibilityAtStart,
+    phases: computeFramePhases(env.monitor.stampsSnapshot(), t0, t1),
+    workerEpochs,
   };
+}
+
+/**
+ * Start-up worker per-run (sel cold) dengan FrameMonitor kedua: frame baseline, task baru,
+ * lalu `start()` (new Worker → siap, termasuk init_full untuk workload full), lalu satu frame
+ * lagi. Seluruhnya terjadi sebelum jendela ukur run tersebut; spawnMs/initMs/engineInitMs
+ * tetap diukur seperti sebelumnya di dalam `start()`.
+ */
+async function withSpawnMonitor<T>(env: RunEnv, start: () => Promise<T>): Promise<{ value: T; spawn: SpawnWindow }> {
+  await env.spawnMonitor.start();
+  await nextTask();
+  const t = performance.now();
+  let value: T;
+  try {
+    value = await start();
+  } catch (err) {
+    env.spawnMonitor.cancel();
+    throw err;
+  }
+  const frames = await env.spawnMonitor.stop();
+  return { value, spawn: { start: t, end: performance.now(), frames } };
 }
 
 /** Panggilan sinkron terukur di main thread (t0 → fn → t1 tanpa await di antaranya). */
@@ -507,11 +559,14 @@ function timedCall<T>(fn: () => T, wasmMemory?: () => number): Timed<T> {
   return { t0, t1, computeMs: t1 - t0, raw, wasmMemoryBytes: wasmMemory ? wasmMemory() : null };
 }
 
-async function measureRun(mode: ExperimentMode, data: DatasetForRun, env: RunEnv): Promise<PendingRun> {
+async function measureRun(cell: Cell, data: DatasetForRun, env: RunEnv): Promise<PendingRun> {
   const timestamp = new Date().toISOString();
   const { maxIter, tol } = env;
+  const mode = cell.mode;
+  const cold = cell.workerStart === "cold";
   let spawnMs: number | null = null;
   let initMs: number | null = null;
+  let spawn: SpawnWindow | null = null;
 
   // 1. Persiapan di luar timer: modul main thread atau worker
   let jsCore: IrlsCoreModule | null = null;
@@ -519,8 +574,10 @@ async function measureRun(mode: ExperimentMode, data: DatasetForRun, env: RunEnv
   let spawned: SpawnedWorker | null = null;
   if (mode === "A") jsCore = await loadJsCore();
   else if (mode === "C") wasmMain = await loadWasmMain();
-  else if (env.coldWorkers) {
-    spawned = await spawnWorker(mode);
+  else if (cold) {
+    const started = await withSpawnMonitor(env, () => spawnWorker(mode));
+    spawned = started.value;
+    spawn = started.spawn;
     spawnMs = spawned.spawnMs;
     initMs = spawned.initMs;
   } else {
@@ -532,7 +589,7 @@ async function measureRun(mode: ExperimentMode, data: DatasetForRun, env: RunEnv
   const y = data.y.slice();
 
   // 3. Dispatch terukur
-  const m = await measureWindow<RawCoreResult>(mode, env, spawned, async () => {
+  const m = await measureWindow<RawCoreResult>(mode, cold, env, spawned, async () => {
     if (mode === "A") return timedCall(() => jsCore!.irlsCore(X, y, data.n, data.p, maxIter, tol));
     if (mode === "C") {
       return timedCall(
@@ -547,7 +604,7 @@ async function measureRun(mode: ExperimentMode, data: DatasetForRun, env: RunEnv
     );
   });
 
-  return { mode, timestamp, spawnMs, initMs, ...m };
+  return { cell, timestamp, spawnMs, initMs, spawn, ...m };
 }
 
 /** Keluaran pipeline analisis lengkap: hasil mesin + tabel SPSS terformat. */
@@ -564,10 +621,11 @@ interface FullOutput {
 type SpssFormatter = (raw: unknown) => BinaryLogisticOutput;
 
 interface PendingFullRun extends Measured<FullOutput> {
-  mode: ExperimentMode;
+  cell: Cell;
   timestamp: string;
   spawnMs: number | null;
   initMs: number | null;
+  spawn: SpawnWindow | null;
   workerCreated: boolean;
   engineInitMs: number | null;
 }
@@ -586,14 +644,17 @@ function spssFormatter(prepared: PreparedData, input: FullAnalysisInput): SpssFo
  * sama dengan run inti: mesin dimuat dan buffer disalin sebelum timer.
  */
 async function measureFullRun(
-  mode: ExperimentMode,
+  cell: Cell,
   input: FullAnalysisInput,
   format: SpssFormatter,
   env: RunEnv
 ): Promise<PendingFullRun> {
   const timestamp = new Date().toISOString();
+  const mode = cell.mode;
+  const cold = cell.workerStart === "cold";
   let spawnMs: number | null = null;
   let initMs: number | null = null;
+  let spawn: SpawnWindow | null = null;
   let workerCreated = false;
   let engineInitMs: number | null = null;
 
@@ -607,26 +668,35 @@ async function measureFullRun(
   } else if (mode === "C") {
     wasmMain = await loadWasmMain();
     engineInitMs = performance.now() - tLoad;
+  } else if (cold) {
+    // spawn → init → init_full, seluruhnya dipantau spawnMonitor
+    const started = await withSpawnMonitor(env, async () => {
+      const s = await spawnWorker(mode);
+      try {
+        return { s, engineInitMs: await initFullOnWorker(s.worker) };
+      } catch (err) {
+        s.worker.terminate();
+        throw err;
+      }
+    });
+    spawned = started.value.s;
+    spawn = started.spawn;
+    workerCreated = true;
+    spawnMs = spawned.spawnMs;
+    initMs = spawned.initMs;
+    engineInitMs = started.value.engineInitMs;
   } else {
-    if (env.coldWorkers) {
-      spawned = await spawnWorker(mode);
+    const existed = env.pool.has(mode);
+    spawned = await env.pool.get(mode);
+    if (!existed) {
       workerCreated = true;
       spawnMs = spawned.spawnMs;
       initMs = spawned.initMs;
-    } else {
-      const existed = env.pool.has(mode);
-      spawned = await env.pool.get(mode);
-      if (!existed) {
-        workerCreated = true;
-        spawnMs = spawned.spawnMs;
-        initMs = spawned.initMs;
-      }
     }
     try {
       engineInitMs = await initFullOnWorker(spawned.worker);
     } catch (err) {
-      if (env.coldWorkers) spawned.worker.terminate();
-      else env.pool.discard(mode);
+      env.pool.discard(mode);
       throw err;
     }
   }
@@ -635,7 +705,7 @@ async function measureFullRun(
   const y = input.y.slice();
   const { rows, cols, configJson, featureNamesJson } = input;
 
-  const m = await measureWindow<FullOutput>(mode, env, spawned, async () => {
+  const m = await measureWindow<FullOutput>(mode, cold, env, spawned, async () => {
     let timed: Timed<unknown>;
     if (mode === "A") {
       timed = timedCall(() => enter!.calculateBinaryLogistic(X, rows, cols, y, configJson, featureNamesJson));
@@ -664,7 +734,7 @@ async function measureFullRun(
     return { ...timed, raw: { result: timed.raw, formatted, formatMs: tDone - f0, tDone, wasmTimings } };
   });
 
-  return { mode, timestamp, spawnMs, initMs, workerCreated, engineInitMs, ...m };
+  return { cell, timestamp, spawnMs, initMs, spawn, workerCreated, engineInitMs, ...m };
 }
 
 function normalizeResult(raw: RawCoreResult, mode: ExperimentMode): CoreResult {
@@ -687,13 +757,46 @@ interface RecordContext {
   p: number;
   rep: number;
   orderInRep: number;
-  coldWorkers: boolean;
+}
+
+/** Metrik v2 satu run: start-up per-run, rincian latensi worker, fase frame. */
+type ExtraMetrics = Pick<
+  RunMetrics,
+  | "spawnMaxFrameGapMs"
+  | "spawnDroppedFrames"
+  | "spawnLongTaskCount"
+  | "dispatchLatencyMs"
+  | "returnLatencyMs"
+  | "workerHandlerMs"
+  | "clockCheckFailed"
+  | "t0PhaseMs"
+  | "t1PhaseMs"
+  | "nextFrameAfterT1Ms"
+>;
+
+/**
+ * Long task jendela start-up diambil SEBELUM jendela ukur: collect() membuang entri yang
+ * berakhir sebelum akhir jendela yang diminta, dan jendela start-up lebih awal.
+ */
+function extraMetrics(pending: Measured<unknown> & { spawn: SpawnWindow | null }, longTasks: LongTaskCollector): ExtraMetrics {
+  const spawnLt = pending.spawn ? longTasks.collect(pending.spawn.start, pending.spawn.end) : null;
+  const lat = workerLatencies(pending.t0, pending.t1, pending.workerEpochs, performance.timeOrigin);
+  return {
+    spawnMaxFrameGapMs: pending.spawn ? pending.spawn.frames.maxFrameGapMs : null,
+    spawnDroppedFrames: pending.spawn ? pending.spawn.frames.droppedFrames : null,
+    spawnLongTaskCount: spawnLt ? spawnLt.count : null,
+    dispatchLatencyMs: lat ? lat.dispatchLatencyMs : null,
+    returnLatencyMs: lat ? lat.returnLatencyMs : null,
+    workerHandlerMs: lat ? lat.workerHandlerMs : null,
+    clockCheckFailed: lat ? lat.clockCheckFailed : null,
+    ...pending.phases,
+  };
 }
 
 function finalizeRun(pending: PendingRun, ctx: RecordContext, longTasks: LongTaskCollector): RunRecord {
+  const extra = extraMetrics(pending, longTasks);
   const lt = longTasks.collect(pending.t0, pending.windowEnd);
   const e2eMs = pending.t1 - pending.t0;
-  const isWorker = MODES[pending.mode].location === "worker";
   return {
     batchId: ctx.batchId,
     workload: "core",
@@ -703,8 +806,9 @@ function finalizeRun(pending: PendingRun, ctx: RecordContext, longTasks: LongTas
     p: ctx.p,
     rep: ctx.rep,
     orderInRep: ctx.orderInRep,
-    mode: pending.mode,
-    workerStart: isWorker ? (ctx.coldWorkers ? "cold" : "warm") : null,
+    mode: pending.cell.mode,
+    workerStart: pending.cell.workerStart,
+    cell: pending.cell.id,
     computeMs: pending.computeMs,
     e2eMs,
     overheadMs: e2eMs - pending.computeMs,
@@ -725,7 +829,8 @@ function finalizeRun(pending: PendingRun, ctx: RecordContext, longTasks: LongTas
     wasmMemoryMB: bytesToMB(pending.wasmMemoryBytes),
     wasmSerializeMs: null,
     pageHidden: pending.pageHidden,
-    result: pending.raw && !pending.error ? normalizeResult(pending.raw, pending.mode) : null,
+    ...extra,
+    result: pending.raw && !pending.error ? normalizeResult(pending.raw, pending.cell.mode) : null,
     error: pending.error,
     timestamp: pending.timestamp,
   };
@@ -739,6 +844,7 @@ function finalizeFullRun(
   featureNames: string[],
   tablesHash: string | null
 ): RunRecord {
+  const extra = extraMetrics(pending, longTasks);
   const lt = longTasks.collect(pending.t0, pending.windowEnd);
   const e2eMs = pending.t1 - pending.t0;
   const out = pending.error ? null : pending.raw;
@@ -751,8 +857,9 @@ function finalizeFullRun(
     p: ctx.p,
     rep: ctx.rep,
     orderInRep: ctx.orderInRep,
-    mode: pending.mode,
-    workerStart: MODES[pending.mode].location === "worker" ? (ctx.coldWorkers ? "cold" : "warm") : null,
+    mode: pending.cell.mode,
+    workerStart: pending.cell.workerStart,
+    cell: pending.cell.id,
     computeMs: pending.computeMs,
     e2eMs,
     overheadMs: e2eMs - pending.computeMs,
@@ -773,6 +880,7 @@ function finalizeFullRun(
     wasmMemoryMB: bytesToMB(pending.wasmMemoryBytes),
     wasmSerializeMs: out?.wasmTimings ? out.wasmTimings.serializeMs : null,
     pageHidden: pending.pageHidden,
+    ...extra,
     result: out
       ? { ...coefficientsFromResult(out.result, featureNames), wasmCoreMs: out.wasmTimings ? out.wasmTimings.analysisMs : null }
       : null,
@@ -787,12 +895,20 @@ export interface BatchCallbacks {
   onProgress: (progress: BatchProgress) => void;
 }
 
-export function totalBatchRuns(settings: Pick<BatchSettings, "sizes" | "warmup" | "repetitions">): number {
-  return settings.sizes.length * (settings.warmup + settings.repetitions) * MODE_ORDER.length;
+export function totalBatchRuns(settings: Pick<BatchSettings, "sizes" | "warmup" | "repetitions" | "lifecycle">): number {
+  return settings.sizes.length * (settings.warmup + settings.repetitions) * cellsFor(settings.lifecycle).length;
+}
+
+/** Urutan ukuran N yang dipakai batch: naik, atau diacak dengan orderSeed. */
+export function sizeOrderFor(settings: Pick<BatchSettings, "sizes" | "sizeOrder" | "orderSeed">): number[] {
+  return settings.sizeOrder === "shuffled"
+    ? shuffledSizes(settings.sizes, settings.orderSeed)
+    : [...new Set(settings.sizes)].sort((a, b) => a - b);
 }
 
 export class ExperimentSession {
   private readonly monitor = new FrameMonitor();
+  private readonly spawnMonitor = new FrameMonitor();
   private readonly longTasks = new LongTaskCollector();
   private pool = new WorkerPool();
   private busy = false;
@@ -803,13 +919,15 @@ export class ExperimentSession {
    * sesi, di luar pengukuran), atau nilai dari captureEnvironment batch.
    */
   private ensureFrameInterval(measuredMs?: number | null): Promise<void> {
+    const apply = (ms: number | null | undefined) => {
+      this.monitor.frameIntervalMs = sanitizeFrameInterval(ms);
+      this.spawnMonitor.frameIntervalMs = this.monitor.frameIntervalMs;
+    };
     if (measuredMs !== undefined) {
-      this.monitor.frameIntervalMs = sanitizeFrameInterval(measuredMs);
+      apply(measuredMs);
       this.frameIntervalReady = Promise.resolve();
     } else if (!this.frameIntervalReady) {
-      this.frameIntervalReady = estimateRefreshInterval().then((ms) => {
-        this.monitor.frameIntervalMs = sanitizeFrameInterval(ms);
-      });
+      this.frameIntervalReady = estimateRefreshInterval().then(apply);
     }
     return this.frameIntervalReady;
   }
@@ -841,8 +959,8 @@ export class ExperimentSession {
     try {
       await this.ensureFrameInterval();
       this.longTasks.start();
-      const env = this.env(opts.coldWorkers, opts.maxIter, opts.tol);
-      const pending = await measureRun(mode, data, env);
+      const env = this.env(opts.maxIter, opts.tol);
+      const pending = await measureRun(cellFor(mode, opts.coldWorkers), data, env);
       await interRunPause();
       return finalizeRun(
         pending,
@@ -854,7 +972,6 @@ export class ExperimentSession {
           p: data.p,
           rep: 0,
           orderInRep: 1,
-          coldWorkers: opts.coldWorkers,
         },
         this.longTasks
       );
@@ -874,10 +991,12 @@ export class ExperimentSession {
     try {
       await this.ensureFrameInterval();
       this.longTasks.start();
-      const env = this.env(opts.coldWorkers, DEFAULT_MAX_ITER, DEFAULT_TOL);
+      const env = this.env(DEFAULT_MAX_ITER, DEFAULT_TOL);
       const input = prepared.full;
-      const pending = await measureFullRun(mode, input, spssFormatter(prepared, input), env);
+      const cell = cellFor(mode, opts.coldWorkers);
+      const pending = await measureFullRun(cell, input, spssFormatter(prepared, input), env);
       await interRunPause();
+      const extra = extraMetrics(pending, this.longTasks);
       const lt = this.longTasks.collect(pending.t0, pending.windowEnd);
       const e2eMs = pending.t1 - pending.t0;
       const out = pending.error ? null : pending.raw;
@@ -886,7 +1005,8 @@ export class ExperimentSession {
         timestamp: pending.timestamp,
         rows: input.rows,
         cols: input.cols,
-        workerStart: MODES[mode].location === "worker" ? (opts.coldWorkers ? "cold" : "warm") : null,
+        workerStart: cell.workerStart,
+        cell: cell.id,
         workerCreated: pending.workerCreated,
         engineInitMs: pending.engineInitMs,
         computeMs: pending.computeMs,
@@ -905,6 +1025,7 @@ export class ExperimentSession {
         wasmMemoryMB: bytesToMB(pending.wasmMemoryBytes),
         wasmSerializeMs: out?.wasmTimings ? out.wasmTimings.serializeMs : null,
         pageHidden: pending.pageHidden,
+        ...extra,
         formatMs: out ? out.formatMs : null,
         totalMs: out ? out.tDone - pending.t0 : null,
         wasmCoreMs: out?.wasmTimings ? out.wasmTimings.analysisMs : null,
@@ -926,12 +1047,15 @@ export class ExperimentSession {
   ): Promise<BatchOutcome> {
     this.assertIdle();
     validateSettings(settings);
+    checkSizes(settings.sizes, prepared.n, settings.sampling);
     this.busy = true;
 
     const full = settings.workload === "full";
     const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
     const batchId = full ? `batch-full-${stamp}` : `batch-${stamp}`;
     const total = totalBatchRuns(settings);
+    const cells = cellsFor(settings.lifecycle);
+    const sizeOrderUsed = sizeOrderFor(settings);
     const records: RunRecord[] = [];
     const report = (phase: BatchProgress["phase"], N: number | null, completed: number, message: string) =>
       callbacks.onProgress({ phase, N, completed, total, message });
@@ -958,16 +1082,18 @@ export class ExperimentSession {
         p: prepared.p,
         cols: prepared.full.cols,
       },
+      sizeOrderUsed,
       orders: [],
+      session: readSessionInfo(),
     };
 
     try {
-      // Modul main thread (cold sekali per page load) dan worker warm (sekali per batch)
+      // Modul main thread (cold sekali per page load) dan worker persistent (sekali per batch)
       await this.preload(settings.workload);
       meta.mainThreadInit = getMainThreadInit();
       this.pool.dispose();
       this.pool = new WorkerPool();
-      if (!settings.coldWorkers) {
+      if (settings.lifecycle !== "per-run") {
         const workerB = await this.pool.get("B");
         const workerD = await this.pool.get("D");
         meta.warmWorkerInit = { ...this.pool.initInfo };
@@ -978,31 +1104,31 @@ export class ExperimentSession {
         }
       }
       this.longTasks.start();
-      const env = this.env(settings.coldWorkers, settings.maxIter, settings.tol, signal);
+      const env = this.env(settings.maxIter, settings.tol, signal);
 
       let completed = 0;
       let runIndex = 0;
-      for (const N of settings.sizes) {
+      for (const N of sizeOrderUsed) {
         if (signal.aborted) throw new AbortRunError();
         report("preparing", N, completed, `Preparing dataset N = ${N.toLocaleString()}…`);
-        const data = full ? null : resample(prepared.X, prepared.y, prepared.n, prepared.p, N, settings.seed);
-        const fullInput = full ? resampleFull(prepared.full, N, settings.seed) : null;
+        const data = full ? null : sampleDataset(prepared, N, settings.sampling, settings.dataSeed);
+        const fullInput = full ? sampleFull(prepared.full, N, settings.sampling, settings.dataSeed) : null;
         const format = fullInput ? spssFormatter(prepared, fullInput) : null;
-        // Stream acak urutan mode per N, terpisah dari stream resampling
-        const orderRng = mulberry32(deriveSeed(settings.seed, N));
+        // Stream acak urutan sel per N dari orderSeed, terpisah dari stream data
+        const orderRng = cellOrderRng(settings.orderSeed, N);
 
         for (let rep = 1 - settings.warmup; rep <= settings.repetitions; rep++) {
           const isWarmup = rep <= 0;
-          const order = shuffleInPlace([...MODE_ORDER], orderRng);
-          if (!isWarmup) meta.orders.push({ N, rep, order: [...order] });
+          const order = shuffleInPlace([...cells], orderRng);
+          if (!isWarmup) meta.orders.push({ N, rep, order: order.map((c) => c.id) });
 
           for (let k = 0; k < order.length; k++) {
             if (signal.aborted) throw new AbortRunError();
-            const mode = order[k];
+            const cell = order[k];
             const label = isWarmup
               ? `Warm-up ${rep + settings.warmup}/${settings.warmup}`
               : `Rep ${rep}/${settings.repetitions}`;
-            const progressText = `N = ${N.toLocaleString()} · ${label} · ${MODES[mode].short}`;
+            const progressText = `N = ${N.toLocaleString()} · ${label} · ${MODES[cell.mode].short}${cell.workerStart ? ` (${cell.workerStart})` : ""}`;
             const ctx = (): RecordContext => ({
               batchId,
               runIndex: isWarmup ? 0 : ++runIndex,
@@ -1011,11 +1137,10 @@ export class ExperimentSession {
               p: prepared.p,
               rep,
               orderInRep: k + 1,
-              coldWorkers: settings.coldWorkers,
             });
             let rec: RunRecord;
             if (fullInput && format) {
-              const pending = await measureFullRun(mode, fullInput, format, env);
+              const pending = await measureFullRun(cell, fullInput, format, env);
               // Tabel SPSS hanya di-hash (di luar jendela ukur) lalu dibuang
               const tablesHash = pending.raw && !pending.error ? spssTablesHash(pending.raw.formatted) : null;
               completed++;
@@ -1023,7 +1148,7 @@ export class ExperimentSession {
               await interRunPause();
               rec = finalizeFullRun(pending, ctx(), this.longTasks, prepared.featureNames, tablesHash);
             } else {
-              const pending = await measureRun(mode, data!, env);
+              const pending = await measureRun(cell, data!, env);
               completed++;
               report(isWarmup ? "warmup" : "measure", N, completed, progressText);
               await interRunPause();
@@ -1046,6 +1171,12 @@ export class ExperimentSession {
       // Worker warm dibuang setelah batch (Run once membuat ulang bila perlu)
       this.pool.dispose();
       this.pool = new WorkerPool();
+      // Fokus/visibilitas akhir dan verifikasi hash .wasm, setelah semua run (lihat captureEnvironmentEnd)
+      try {
+        await captureEnvironmentEnd(meta.environment);
+      } catch {
+        // metadata tambahan; batch tetap valid tanpa ini
+      }
       this.busy = false;
     }
 
@@ -1055,12 +1186,21 @@ export class ExperimentSession {
 
   dispose(): void {
     this.monitor.cancel();
+    this.spawnMonitor.cancel();
     this.longTasks.stop();
     this.pool.dispose();
   }
 
-  private env(coldWorkers: boolean, maxIter: number, tol: number, signal?: AbortSignal): RunEnv {
-    return { monitor: this.monitor, longTasks: this.longTasks, pool: this.pool, coldWorkers, maxIter, tol, signal };
+  private env(maxIter: number, tol: number, signal?: AbortSignal): RunEnv {
+    return {
+      monitor: this.monitor,
+      spawnMonitor: this.spawnMonitor,
+      longTasks: this.longTasks,
+      pool: this.pool,
+      maxIter,
+      tol,
+      signal,
+    };
   }
 
   private assertIdle(): void {
@@ -1073,7 +1213,11 @@ export function validateSettings(s: BatchSettings): void {
   if (s.sizes.some((n) => !Number.isInteger(n) || n < 1)) throw new Error("Every data size N must be a positive integer.");
   if (!Number.isInteger(s.warmup) || s.warmup < 0) throw new Error("Warm-up runs must be a non-negative integer.");
   if (!Number.isInteger(s.repetitions) || s.repetitions < 1) throw new Error("Repetitions must be a positive integer.");
-  if (!Number.isInteger(s.seed)) throw new Error("Seed must be an integer.");
+  if (!Number.isInteger(s.dataSeed)) throw new Error("Data seed must be an integer.");
+  if (!Number.isInteger(s.orderSeed)) throw new Error("Order seed must be an integer.");
+  if (s.sampling !== "resample" && s.sampling !== "prefix") throw new Error(`Unknown sampling "${s.sampling}".`);
+  if (s.sizeOrder !== "ascending" && s.sizeOrder !== "shuffled") throw new Error(`Unknown size order "${s.sizeOrder}".`);
+  if (!["persistent", "per-run", "interleaved"].includes(s.lifecycle)) throw new Error(`Unknown worker lifecycle "${s.lifecycle}".`);
   if (!Number.isInteger(s.maxIter) || s.maxIter < 1) throw new Error("Max iterations must be a positive integer.");
   if (!(s.tol > 0)) throw new Error("Convergence tolerance must be positive.");
 }
