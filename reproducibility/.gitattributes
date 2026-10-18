@@ -1,0 +1,4 @@
+# Data mentah dan bukti provenance disimpan byte demi byte, tanpa konversi akhir baris
+# (CSV dari aplikasi memakai CRLF; checksum harus sama dengan file aslinya).
+data/** -text
+provenance/** -text
