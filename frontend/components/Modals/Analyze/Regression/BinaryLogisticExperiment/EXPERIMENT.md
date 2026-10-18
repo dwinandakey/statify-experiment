@@ -517,6 +517,31 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
 `node components/Modals/Analyze/Regression/BinaryLogisticExperiment/scripts/genIrlsFixtures.mjs`
 (dari folder `frontend`).
 
+### Pembanding native (v2)
+
+`irls_core` yang sama dengan paket wasm juga dikompilasi native sebagai **titik pembanding**
+untuk workload *core* dalam kondisi warm. Native **bukan faktor eksperimen**: tidak ada di
+desain teknologi × lokasi × siklus hidup, tidak diacak bersama sel browser, dan tidak masuk
+analisis faktorial. Gunanya menunjukkan berapa jauh JS/Wasm di browser dari kode mesin untuk
+algoritma yang identik.
+
+- Biner `src/bin/irls_native_bench.rs` di crate `BinaryLogistic/rust` memanggil
+  `bench::irls_core::irls_core` lewat library crate (tidak disalin). Tanpa dependensi baru,
+  jadi `Cargo.lock` (dan paket wasm yang diukur) tidak berubah; SHA-256 ditulis di biner itu.
+- Input: design matrix workload core per N yang diekspor orkestrator
+  (`benchmark-results/<runId>/design/N<N>.X.f64`, `.y.f64`, `.json`; Float64 little-endian,
+  baris prefix yang sama dengan batch), diverifikasi SHA-256-nya sebelum dipakai.
+- Setiap N (urutan diacak per proses): warm-up 5 lalu 30 repetisi; waktu diukur
+  `std::time::Instant` **hanya** di sekitar pemanggilan `irls_core` (setara `wasmCoreMs`).
+  Keluaran CSV: `invocation, N, p, rep, computeMs, iterations, converged, neg2ll, beta_*, se_*`.
+- `frontend/scripts/runNative.mjs <runDir>` membangun
+  `cargo build --release --locked --bin irls_native_bench` (toolchain terkunci, target host
+  default x86-64 tanpa `-C target-cpu=native`; `RUSTFLAGS` dari environment dikosongkan),
+  mencatat `rustc -Vv` dan model CPU, menjalankan 10 proses terpisah dengan jeda 10 detik, dan
+  menulis `<runDir>/native/` (`invocation-NN.csv`, `native.json`).
+- Cek otomatis: β dan SE native harus sama dengan sel D-warm (run sukses pertama tiap N) sesi
+  pilot, |Δ| ≤ 1e-12 · max(1, |nilai|). Uji coba: selisih berskala maksimum ±1e-15.
+
 ## 9. Panduan menjalankan benchmark dengan benar
 
 1. **Wajib production build.** `next dev` memakai React development mode,
