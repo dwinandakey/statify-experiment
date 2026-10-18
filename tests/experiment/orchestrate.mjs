@@ -301,7 +301,9 @@ async function launchBrowser(cfg, browserName, executablePath) {
     defaultViewport: null,
     // Satu evaluate menunggu seluruh batch (lihat waitForBatchOutputs)
     protocolTimeout: (cfg.batchTimeoutMin + 15) * 60_000,
-    args: browserName === "chrome" ? ["--window-position=0,0"] : [],
+    // Tanpa argumen jendela: dengan --window-position, MainWindowHandle Chrome bernilai 0 sehingga
+    // jendela tidak bisa dimaksimalkan/dibawa ke foreground; posisi diatur lewat maksimalisasi OS.
+    args: [],
   });
   const spawnargs = browser.process()?.spawnargs ?? [];
   // Profil sementara yang dibuat Puppeteer: Chrome --user-data-dir=..., Firefox --profile <dir>
