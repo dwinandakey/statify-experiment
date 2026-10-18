@@ -1,0 +1,8 @@
+# Toolchain untuk crate ini, dikunci ke versi yang membangun paket wasm eksperimen
+# yang diukur (metadata producers di statify_logistic_bg.wasm: rustc 1.91.1).
+# rustup memakai file ini otomatis untuk cargo/wasm-pack yang dijalankan di folder ini,
+# termasuk build paket produksi dari crate yang sama.
+[toolchain]
+channel = "1.91.1"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

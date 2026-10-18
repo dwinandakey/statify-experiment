@@ -1,22 +1,29 @@
-# Eksperimen 2×2: WebAssembly dan Web Worker untuk Regresi Logistik Biner
+# Strategi eksekusi untuk komputasi statistik di browser: WebAssembly, Web Worker, dan siklus hidup worker pada regresi logistik biner
 
 Dokumen ini menjelaskan desain, implementasi, metrik, prosedur, dan keterbatasan
 menu **Analyze → Regression → Binary Logistic (Experiment)**. Isinya disusun
-sebagai bahan bagian *Method* artikel *Evaluating WebAssembly and Web Workers
-for Browser-Based Statistical Computing*.
+sebagai bahan bagian *Method* artikel *Execution Strategies for Client-Side
+Statistical Computing: A Factorial Case Study of WebAssembly, Web Workers, and
+Worker Lifecycle in Logistic Regression*. Data, skrip analisis, dan langkah
+reproduksi tabel dan gambar artikel ada di `reproducibility/REPRODUCE.md` (root repo).
 
 ## 1. Tujuan
 
-Memisahkan kontribusi dua faktor terhadap kinerja dan responsivitas komputasi
-statistik di browser, dengan algoritma IRLS regresi logistik biner sebagai beban kerja:
+Memisahkan kontribusi tiga keputusan strategi eksekusi terhadap kinerja dan
+responsivitas komputasi statistik di browser, dengan regresi logistik biner
+(IRLS) sebagai beban kerja:
 
 1. **Teknologi komputasi**: JavaScript (JIT V8) vs Rust yang dikompilasi ke WebAssembly.
 2. **Lokasi eksekusi**: main thread (UI thread) vs Web Worker (thread terpisah).
+3. **Siklus hidup worker** (hanya bila lokasinya worker): **persistent**, satu
+   worker dibuat sekali lalu dipakai ulang untuk setiap run, vs **per-run**,
+   worker baru untuk setiap run yang diakhiri setelah run selesai.
 
-Statify produksi hanya memakai konfigurasi D. Eksperimen ini menjalankan keempat
-kombinasi dengan inti algoritma yang identik, sehingga perbedaan yang terukur
-berasal dari runtime dan lokasi eksekusi, bukan dari perbedaan algoritma atau
-library aljabar.
+Statify produksi memakai konfigurasi D (Wasm di worker). Eksperimen ini
+menjalankan keempat konfigurasi A–D, pada workload *IRLS core* dengan inti
+algoritma yang identik di kedua bahasa (perbedaan terukur berasal dari runtime
+dan lokasi eksekusi, bukan dari algoritma atau library aljabar) dan pada workload
+*full analysis* yang memakai jalur analisis lengkap (§6).
 
 ## 2. Desain faktorial
 
@@ -27,12 +34,28 @@ library aljabar.
 | C | Rust-WebAssembly | Main thread | `pkg/statify_logistic.js` → `irls_core_bench` di main thread |
 | D | Rust-WebAssembly | Web Worker | `pkg/statify_logistic.js` → `irls_core_bench` via `wasmCore.worker.js` |
 
+Siklus hidup worker adalah faktor **bersarang** di dalam lokasi worker: hanya
+berlaku untuk B dan D, jadi desainnya bukan 2×2×2. Desainnya adalah faktorial
+teknologi × lokasi (konfigurasi A–D), dengan dua tingkat siklus hidup untuk B dan D:
+
+| Siklus hidup | Di dialog | Di data (CSV, meta.json) | Biaya pembuatan worker |
+|---|---|---|---|
+| persistent | *Fresh worker per run (cold)* tidak dicentang | `workerStart = warm`, `coldWorkers = false` | sekali sebelum batch, di luar run (`warmSpawnMs*`, `warmInitMs*`, `warmEngineInitMs*` di meta) |
+| per-run | dicentang | `workerStart = cold`, `coldWorkers = true` | setiap run, sebelum timer (`spawnMs`, `initMs`, `engineInitMs` per baris) |
+
+Untuk A dan C pengaturan ini tidak berpengaruh karena tidak ada worker. Artikel
+memakai empat batch: IRLS core dan full analysis, masing-masing dengan worker
+persistent dan per-run (§9).
+
 Kontras yang bisa diestimasi dari data per run (CSV):
 
 - Efek utama teknologi: (A + B) vs (C + D).
 - Efek utama lokasi: (A + C) vs (B + D).
 - Interaksi: (A − B) − (C − D), yaitu apakah biaya memindahkan kerja ke worker
   berbeda untuk JS dan Wasm.
+- Efek siklus hidup, per worker (B, D): per-run vs persistent, yaitu biaya
+  start-up (`spawnMs + initMs + engineInitMs`) dan penalti komputasi pada worker
+  yang baru dibuat.
 
 Semua file eksperimen:
 
@@ -46,11 +69,14 @@ Semua file eksperimen:
 | `frontend/components/Modals/Analyze/Regression/BinaryLogistic/rust/src/bench/` | Inti IRLS Rust (`irls_core.rs`) + golden test data |
 | `frontend/components/Modals/Analyze/Regression/BinaryLogisticExperiment/` | Dialog, services, tipe, skrip (`scripts/`), dokumen ini |
 | `frontend/__tests__/irlsCore.experiment.test.js`, `binaryLogisticExperiment.*.test.ts`, `logisticEnterParity.experiment.test.js` | Unit test Jest |
-| `tests/experiment/` | E2E Playwright (config terpisah + fixture CSV) |
+| `tests/experiment/` | E2E Playwright (config terpisah + fixture CSV) dan runner benchmark `benchmark-workloads.spec.ts` |
+| `reproducibility/` | Data keempat batch artikel, skrip analisis (tabel dan gambar), `REPRODUCE.md` |
 
 Modul Binary Logistic produksi, worker produksi, dan paket wasm produksi
 (`public/workers/Regression/Binary/pkg`) tidak diubah. Crate Rust produksi hanya
-ditambah modul `bench` dan satu fungsi ekspor baru `irls_core_bench`.
+ditambah modul `bench` (ekspor `irls_core_bench`, `calculate_binary_logistic_timed`,
+`last_full_timings`) serta `Cargo.lock` dan `rust-toolchain.toml` untuk mengunci
+build (§8); keduanya juga berlaku untuk build produksi dari crate yang sama.
 
 ## 3. Spesifikasi algoritma
 
@@ -166,8 +192,8 @@ sehingga dataset N kecil adalah awalan (*prefix*) dari aliran indeks N besar.
 | `wasmSerializeMs` | (Workload *full*, C/D) `serde_json::to_string` atas hasil, di dalam Wasm. Sisa `computeMs − wasmCoreMs − wasmSerializeMs` = boundary JS↔Wasm (salin-masuk X/y, string JSON ke JS, `JSON.parse`). |
 | `e2eMs` | Diukur di main thread, dari tepat sebelum dispatch (setelah data siap dan disalin) sampai hasil tersedia di main thread. Worker: dari sebelum `postMessage` sampai awal handler `onmessage` (structured clone hasil sudah terjadi). Main: dispatch = pemanggilan fungsi, sehingga `e2eMs = computeMs`. |
 | `overheadMs` | `e2eMs − computeMs`: postMessage, transfer/clone, penjadwalan event loop, dan selisih jam antar konteks. Nol untuk mode main. |
-| `spawnMs` | Mode worker **cold**: dari `new Worker()` sampai pesan `ready` diterima di main thread, dikurangi `initMs`. Mencakup pembuatan thread, fetch + evaluasi modul worker (dan `irls_core.js`/glue wasm yang diimpor statis), serta round-trip pesan. |
-| `initMs` | Mode worker **cold**: inisialisasi di dalam worker. D: `await init()` (fetch, compile, instantiate `.wasm`); B: ≈ 0 karena tidak ada yang perlu di-init. Untuk worker **warm** keduanya dicatat sekali per batch (`warmSpawnMs*`, `warmInitMs*`). Untuk mode **main** dicatat sekali per page load (`mainJsImportMs`, `mainWasmImportMs`, `mainWasmInitMs`). |
+| `spawnMs` | Worker **per-run** (cold): dari `new Worker()` sampai pesan `ready` diterima di main thread, dikurangi `initMs`. Mencakup pembuatan thread, fetch + evaluasi modul worker (dan `irls_core.js`/glue wasm yang diimpor statis), serta round-trip pesan. |
+| `initMs` | Worker **per-run** (cold): inisialisasi di dalam worker. D: `await init()` (fetch, compile, instantiate `.wasm`); B: ≈ 0 karena tidak ada yang perlu di-init. Untuk worker **persistent** (warm) keduanya dicatat sekali per batch (`warmSpawnMs*`, `warmInitMs*`). Untuk mode **main** dicatat sekali per page load (`mainJsImportMs`, `mainWasmImportMs`, `mainWasmInitMs`). |
 | `maxFrameGapMs` | Jarak maksimum antar callback `requestAnimationFrame` selama run, diukur dengan `performance.now()` **saat callback berjalan** (bukan argumen timestamp rAF, lihat §10). Monitor dimulai pada satu frame baseline sebelum dispatch dan dihentikan satu frame **setelah** hasil tersedia, agar gap yang memuat blocking ikut tercatat. |
 | `droppedFrames` | Perkiraan jumlah **frame yang terlewat**: Σ max(0, round(gap / T) − 1) atas semua gap rAF di jendela run, T = `frameIntervalMs`. Satu gap 255 ms pada 60 Hz dihitung 14 frame, bukan 1. |
 | `longGapCount` | Jumlah **gap** rAF > 2T (jumlah gap, bukan jumlah frame). Ini definisi `droppedFrames` versi awal; dipertahankan untuk kesinambungan. |
@@ -181,12 +207,13 @@ sehingga dataset N kecil adalah awalan (*prefix*) dari aliran indeks N besar.
 | `workload` | `core` (inti IRLS) atau `full` (analisis lengkap + tabel SPSS, §6 *Batch workload Full analysis*). |
 | `formatMs` | (Workload *full*) formatter SPSS produksi di main thread setelah hasil tersedia, termasuk penambahan `model_info`; di dalam jendela ukur, di luar `e2eMs`. |
 | `totalMs` | (Workload *full*) dispatch → tabel SPSS selesai diformat, kira-kira `e2eMs + formatMs`: waktu sampai laporan siap ditulis. |
-| `engineInitMs` | (Workload *full*) pemuatan mesin analisis lengkap sebelum timer: `logistic_enter.js` (A, B) atau `init()` wasm (C, D); ≈ 0 bila sudah dimuat. Untuk worker warm dicatat sekali per batch (`warmEngineInitMs*`). |
+| `engineInitMs` | (Workload *full*) pemuatan mesin analisis lengkap sebelum timer: `logistic_enter.js` (A, B) atau `init()` wasm (C, D); ≈ 0 bila sudah dimuat. Untuk worker persistent dicatat sekali per batch (`warmEngineInitMs*`). |
 | `tablesHash`, `tablesIdenticalToD` | (Workload *full*) hash cyrb53 isi tabel SPSS run itu, dan apakah sama dengan run sukses pertama mode D pada N yang sama. |
 
 Metadata lingkungan (di setiap baris CSV dan di `meta.json`): `userAgent`,
 `hardwareConcurrency`, `deviceMemory`, `crossOriginIsolated`, waktu mulai,
-`gitCommit` (dari `NEXT_PUBLIC_GIT_COMMIT` saat build), `buildMode`
+`gitCommit` (dari `NEXT_PUBLIC_GIT_COMMIT` saat build; `npm run build:experiment`
+mengisinya dari HEAD, §9), `buildMode`
 (`NODE_ENV`), estimasi interval refresh layar (`refreshIntervalMs`, median gap
 rAF saat idle), dan estimasi resolusi `performance.now()` (`timerResolutionMs`,
 selisih positif terkecil antar pembacaan).
@@ -221,9 +248,10 @@ ukuran N (urut naik):
    `mulberry32(hash(seed, N))`) untuk mengurangi bias drift/thermal. Urutan
    tercatat di `meta.json` (`orders`) dan kolom `orderInRep`.
 4. Setiap run:
-   1. Modul/worker disiapkan (di luar timer). Worker warm dibuat dan di-init sekali
-      sebelum batch; dengan opsi *fresh worker per run (cold)* worker baru dibuat
-      untuk setiap run dan diakhiri setelahnya.
+   1. Modul/worker disiapkan (di luar timer). Worker persistent dibuat dan di-init
+      sekali sebelum batch. Dengan siklus hidup per-run (centang *Fresh worker per
+      run (cold)*), worker baru dibuat dan di-init untuk setiap run sebelum timer,
+      lalu diakhiri setelah run.
    2. `X.slice()` dan `y.slice()` dibuat **sebelum** timer untuk semua mode
       (diperlukan sebagai transferable untuk worker; dilakukan juga untuk mode
       main agar perlakuannya sama).
@@ -290,7 +318,7 @@ analisis di dalam Wasm dari serialisasi dan boundary JS↔Wasm.
      `Method: Enter · computed with B. JavaScript – Web Worker`. Kartu ini
      bisa dimatikan dengan kotak *Include the SPSS tables when pressing OK*
      (OK lalu hanya menulis laporan performa).
-  2. **"Binary Logistic (Experiment): 2×2 performance"**: tabel
+  2. **"Binary Logistic (Experiment): 2×2 performance"** (nama kartu di aplikasi): tabel
      *Analysis run performance – \<konfigurasi\>* untuk run OK tersebut, lalu,
      bila ada, ringkasan Run once, batch *IRLS core*, batch *full analysis*
      (median [Q1–Q3] dan akurasi antar mode, termasuk jumlah run yang tabel
@@ -363,7 +391,7 @@ Metrik pada kartu *Analysis run (OK)*:
 | `stepHalvings` | Step-halving fit model akhir (`fitting_warnings.step_halving_count`, 0 bila tidak ada). |
 | `e2eMs`, `overheadMs` | Seperti §5; untuk B/D `overheadMs` memuat structured clone objek hasil lengkap (jauh lebih besar daripada hasil inti). |
 | `engineInitMs` | Pemuatan mesin sebelum timer: `import()` `logistic_enter.js` (A, B di dalam worker) atau `init()` wasm (C, D). ≈ 0 bila sudah dimuat sebelumnya di halaman/worker itu. |
-| `spawnMs`, `initMs` | Hanya bila run OK ini membuat worker baru (cold, atau worker warm pertama di dialog). |
+| `spawnMs`, `initMs` | Hanya bila run OK ini membuat worker baru (per-run, atau worker persistent pertama di dialog). |
 | `maxFrameGapMs`, `droppedFrames`, `longGapCount`, `longTasks`, `mainHeapUsedMB`, `wasmMemoryMB` | Seperti §5 (`mainHeapUsedMB` hanya main thread; jangan dibandingkan antarlokasi). |
 | `formatMs` | `formatBinaryLogisticResult` produksi di main thread (sama untuk keempat mode); di dalam jendela ukur, di luar `e2eMs`. |
 | `totalMs` | Dispatch → tabel SPSS selesai diformat. |
@@ -378,7 +406,7 @@ workload *full* di bawah.
 
 Batch dengan workload **Full analysis + SPSS tables** menjalankan pipeline
 tombol OK di setiap run, dengan prosedur batch yang sama (warm-up, ulangan,
-urutan mode acak, jeda antar run, opsi cold):
+urutan mode acak, jeda antar run, siklus hidup persistent atau per-run):
 
 1. Mesin analisis lengkap per mode (tabel di atas) menghitung hasil.
 2. Tabel SPSS dibentuk dengan formatter produksi di main thread, di dalam
@@ -393,7 +421,7 @@ dengan run sukses pertama mode D (selisih absolut dan berskala
 hash run acuan itu (kolom *SPSS tables* di dialog, `tablesIdenticalToD` di
 CSV). Lulus bila semua tabel identik dan selisih berskala < 1e-8.
 
-Worker warm memuat mesinnya sekali sebelum batch (`warmEngineInitMsB/D` di
+Worker persistent memuat mesinnya sekali sebelum batch (`warmEngineInitMsB/D` di
 CSV). Klik **OK** setelah batch untuk menulis ringkasan dan akurasinya ke
 kartu eksperimen; data per run tetap lewat **Download CSV**. Waktu workload
 *full* membandingkan port JS dengan kode Rust produksi, jadi bukan kontras
@@ -422,22 +450,35 @@ pada langkah penuh). Kasus ketika MLE ≈ 0 justru dihindari, karena di sana
 
 ## 8. Build wasm
 
-Prasyarat (tercatat saat implementasi): `rustc 1.91.1`, `cargo 1.91.1`,
-`wasm-pack 0.13.1`, target `wasm32-unknown-unknown`, wasm-bindgen 0.2.129
-(CLI diunduh otomatis oleh wasm-pack), serde-wasm-bindgen 0.4.5, wasm-opt
-(binaryen) version 117. `Cargo.lock` tidak di-commit (di-ignore repo), jadi
-build ulang dapat me-resolve versi patch dependensi yang lebih baru; catat
-versi yang dipakai saat benchmark.
+Toolchain dan dependensi dikunci di crate `BinaryLogistic/rust`:
 
-```powershell
+- `rust-toolchain.toml`: rustc 1.91.1 dengan target `wasm32-unknown-unknown`;
+  rustup memasangnya otomatis saat cargo/wasm-pack dijalankan di folder crate.
+  Bagian *producers* di `statify_logistic_bg.wasm` yang diukur mencatat rustc
+  1.91.1 dan wasm-bindgen 0.2.129, tanpa fitur `simd128`.
+- `Cargo.lock` (di-commit dengan `git add -f` karena `.gitignore` repo berisi
+  `**/Cargo.lock`): nalgebra 0.32.6, statrs 0.16.1, serde_json 1.0.154,
+  wasm-bindgen 0.2.129, serde-wasm-bindgen 0.4.5.
+- wasm-pack 0.13.1 (`cargo install wasm-pack --version 0.13.1 --locked`); CLI
+  wasm-bindgen yang sesuai lock dan wasm-opt (binaryen 117) diunduh otomatis.
+
+Script build berupa script Node, jadi berjalan di Windows, Linux, dan macOS:
+
+```bash
 cd frontend
-npm run build:wasm:experiment
+npm run build:wasm:experiment             # build lalu salin ke public/.../BinaryExperiment/pkg
+npm run build:wasm:experiment -- --check  # build lalu bandingkan SHA-256 dengan pkg yang ter-commit
 ```
 
-Script tersebut menjalankan `wasm-pack build --target web --release --out-dir target/experiment-pkg`
+Script (`scripts/build-wasm-experiment.mjs`) menjalankan
+`wasm-pack build --target web --release --out-dir target/experiment-pkg`
 di crate `BinaryLogistic/rust` (profil release default: `opt-level = 3`, tanpa
 LTO, lalu `wasm-opt -O`), kemudian menyalin `statify_logistic*` ke
-`public/workers/Regression/BinaryExperiment/pkg/`. `rust/pkg` dan
+`public/workers/Regression/BinaryExperiment/pkg/`. Dengan `--check` tidak ada
+yang disalin; pada mesin build asli hasilnya byte-identik dengan paket yang
+diukur. Di mesin lain hash-nya berbeda walau kodenya sama, karena rustc menanam
+path absolut sumber dependensi (`~/.cargo/registry/...`) di pesan panic; kesamaan
+perilaku dicek dengan `checkEnterParity.mjs` dan golden test di bawah. `rust/pkg` dan
 `public/workers/Regression/Binary/pkg` produksi tidak disentuh. Paket
 eksperimen memuat seluruh crate (termasuk fungsi produksi) plus modul `bench`
 (`irls_core_bench`, `calculate_binary_logistic_timed`, `last_full_timings`),
@@ -446,9 +487,9 @@ produksi.
 
 Unit test:
 
-```powershell
+```bash
 cd frontend/components/Modals/Analyze/Regression/BinaryLogistic/rust
-cargo test
+cargo test --locked
 cd ../../../../../..   # kembali ke frontend
 npx jest __tests__/irlsCore.experiment.test.js __tests__/binaryLogisticExperiment __tests__/logisticEnterParity.experiment.test.js
 ```
@@ -470,14 +511,20 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
    peringatan bila bukan production build; kolom `buildMode` di CSV harus
    `production`).
 
-   ```powershell
+   ```bash
    cd frontend
-   $env:NEXT_PUBLIC_GIT_COMMIT = (git rev-parse --short HEAD)
-   npm run build
-   npm run start        # next start -p 3001 → http://localhost:3001
+   npm run build:experiment   # next build dengan NEXT_PUBLIC_GIT_COMMIT = HEAD
+   npm run start              # next start -p 3001 → http://localhost:3001
    ```
 
-   (`npm run build:experiment` melakukan dua baris pertama sekaligus.)
+   `build:experiment` (`scripts/build-experiment.mjs`) selalu mengisi
+   `NEXT_PUBLIC_GIT_COMMIT` dari `git rev-parse --short HEAD`, mengabaikan nilai
+   yang sudah ada di environment, dan menambahkan akhiran `-dirty` bila file yang
+   dilacak git berubah (`-- --dry-run` hanya menampilkan nilainya). Jangan mengisi
+   variabel itu manual lalu menjalankan `npm run build`: nilai yang tertinggal di
+   terminal ikut ke build berikutnya. Itu yang terjadi pada keempat batch artikel,
+   yang mencatat `gitCommit = 2c8bb04a` padahal build berasal dari `b6747315`
+   (bukti di `reproducibility/REPRODUCE.md` §3).
 2. Satu browser saja (disarankan Chrome/Edge versi stabil terbaru) dan **catat
    versinya** (juga tercatat di `userAgent`). `longtask` dan `performance.memory`
    hanya tersedia di Chromium.
@@ -490,27 +537,43 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
 6. Biarkan tab **tetap terlihat** dan jangan berinteraksi selama batch: rAF
    berhenti di tab latar (run seperti ini ditandai `pageHidden = true`).
 7. Pengaturan baku: warm-up 5, ulangan 30, seed dicatat, ukuran N asli +
-   10.000 + 50.000 + 100.000. Jalankan **kedua workload** (*IRLS core* dan
-   *Full analysis + SPSS tables*) dengan pengaturan dan dataset yang sama;
-   pengaturan batch di dialog dipakai bersama oleh kedua workload, jadi cukup
-   ganti *Workload* lalu *Run batch* lagi. Ulangi dengan opsi *cold* bila ingin
-   mengukur biaya pembuatan worker.
+   10.000 + 50.000 + 100.000. Jalankan **empat batch** dengan pengaturan dan
+   dataset yang sama, berurutan dalam satu sesi; pengaturan batch di dialog
+   dipakai bersama, jadi cukup ganti *Workload* dan centang lalu *Run batch* lagi:
 
-   Runner otomatis (core lalu full di sesi browser yang sama, CSV + meta.json
-   disimpan; dari root repo setelah production build):
+   | Batch | Workload | *Fresh worker per run (cold)* | Siklus hidup B/D |
+   |---|---|---|---|
+   | 1 | IRLS core | tidak dicentang | persistent |
+   | 2 | IRLS core | dicentang | per-run |
+   | 3 | Full analysis + SPSS tables | tidak dicentang | persistent |
+   | 4 | Full analysis + SPSS tables | dicentang | per-run |
 
-   ```powershell
-   $env:EXPERIMENT_BENCH_DATA = "C:\data\dataset.csv"
-   $env:EXPERIMENT_BENCH_CHANNEL = "chrome"   # Chrome terpasang, bukan Chromium Playwright
-   $env:EXPERIMENT_BENCH_DEPENDENT = "Attrition"
-   $env:EXPERIMENT_BENCH_COVARIATES = "Age,BusinessTravel,DistanceFromHome,MaritalStatus,MonthlyIncome,MonthlyRate,OverTime,TotalWorkingYears,YearsAtCompany"
-   $env:EXPERIMENT_PORT = "3002"
+   Runner otomatis menjalankan keempat batch yang sama di satu sesi browser dan
+   menyimpan CSV + meta.json tiap batch ke `benchmark-results/` (batch per-run
+   dengan akhiran `-per-run`, plus `browser.txt` berisi versi browser). Dari root
+   repo setelah production build; runner menyalakan server sendiri di port yang
+   diberikan:
+
+   ```bash
+   EXPERIMENT_BENCH_DATA=/path/to/dataset.csv \
+   EXPERIMENT_BENCH_CHANNEL=chrome \
+   EXPERIMENT_PORT=3002 \
    npx playwright test -c tests/experiment/playwright.experiment.config.ts benchmark-workloads
-   node frontend/components/Modals/Analyze/Regression/BinaryLogisticExperiment/scripts/compareWorkloads.mjs benchmark-results/batch-*.csv
    ```
 
-   Runner berjalan headless; untuk artikel tetap catat versi browser dan
-   bandingkan dengan batch dari jendela browser biasa.
+   Di PowerShell isi variabel yang sama dengan `$env:NAMA = "nilai"` lebih dulu.
+   `EXPERIMENT_BENCH_CHANNEL=chrome` memakai Chrome terpasang, bukan Chromium
+   bawaan Playwright. Default `EXPERIMENT_BENCH_WORKLOADS` adalah
+   `core,core:per-run,full,full:per-run`; entri tanpa `:per-run` memakai worker
+   persistent. Variabel lain (`EXPERIMENT_BENCH_DEPENDENT`,
+   `EXPERIMENT_BENCH_COVARIATES`, `..._WARMUP`, `..._REPETITIONS`, `..._SEED`)
+   dijelaskan di kepala file runner. Ringkasan cepat core vs full:
+   `node frontend/components/Modals/Analyze/Regression/BinaryLogisticExperiment/scripts/compareWorkloads.mjs benchmark-results/batch-*.csv`;
+   tabel dan gambar artikel: `reproducibility/REPRODUCE.md`.
+
+   Runner berjalan headless. Data artikel dikumpulkan manual di jendela Chrome
+   biasa; bila memakai runner, catat versi browser dan bandingkan dengan batch
+   dari jendela biasa.
 8. Unduh **CSV** (satu baris per run) dan **meta.json** setelah setiap batch.
    Pastikan tabel akurasi lulus (< 1e-8; workload *full*: semua tabel SPSS
    identik) dan *Compare with production* lulus (< 1e-4).
@@ -584,6 +647,10 @@ Bila algoritma sengaja diubah di **kedua** inti, buat ulang golden values:
   dengan efek implementasi; kontras teknologi × lokasi yang bersih berasal dari
   workload *core*, dan `wasmCoreMs`/`wasmSerializeMs` membantu memilah biaya
   di dalam Wasm.
+- **Per-run bukan first load.** Worker per-run adalah worker baru di halaman
+  yang modul dan paket wasm-nya sudah pernah dimuat: cache HTTP browser dan
+  cache kode V8 sudah panas. Yang diukur adalah biaya membuat dan menyiapkan
+  worker baru, bukan analisis pertama setelah halaman dibuka.
 - **Validitas eksternal.** Hasil berlaku untuk satu browser/mesin per batch;
   mesin JS dan Wasm lain (SpiderMonkey, JavaScriptCore) dapat berperilaku
   berbeda. Inti eksperimen sengaja lebih sederhana dari `irls::fit` produksi
