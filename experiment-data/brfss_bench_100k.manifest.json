@@ -1,0 +1,159 @@
+{
+  "description": "Dataset benchmark eksperimen v2 (Binary Logistic Experiment), dibuat oleh frontend/components/Modals/Analyze/Regression/BinaryLogisticExperiment/scripts/prepareBrfss.mjs.",
+  "source": {
+    "name": "CDC Diabetes Health Indicators (BRFSS 2015), Kaggle diabetes_binary_health_indicators_BRFSS2015.csv",
+    "doi": "10.24432/C53919",
+    "file": "diabetes_binary_health_indicators_BRFSS2015.csv",
+    "sha256": "19f367e3e3350768f0c144c5d73ee5b355f67a57eaaa86ca7bd8aec594d8b1d0",
+    "rows": 253680,
+    "columns": [
+      "Diabetes_binary",
+      "HighBP",
+      "HighChol",
+      "CholCheck",
+      "BMI",
+      "Smoker",
+      "Stroke",
+      "HeartDiseaseorAttack",
+      "PhysActivity",
+      "Fruits",
+      "Veggies",
+      "HvyAlcoholConsump",
+      "AnyHealthcare",
+      "NoDocbcCost",
+      "GenHlth",
+      "MentHlth",
+      "PhysHlth",
+      "DiffWalk",
+      "Sex",
+      "Age",
+      "Education",
+      "Income"
+    ]
+  },
+  "output": {
+    "file": "brfss_bench_100k.csv",
+    "sha256": "95db7a4624c746b915d04e5abec7d7c0a29ac3b866cc1b66c5d6ef004bf5a3fa",
+    "bytes": 2700220,
+    "rows": 100000,
+    "columns": [
+      "Diabetes_binary",
+      "HighBP",
+      "HighChol",
+      "BMI",
+      "PhysActivity",
+      "Sex",
+      "Age",
+      "Income",
+      "GenHlth"
+    ],
+    "lineEnding": "LF"
+  },
+  "shuffle": {
+    "algorithm": "Fisher–Yates over all input rows (shuffleInPlace, services/prng.ts)",
+    "prng": "mulberry32",
+    "seed": 42,
+    "selection": "first 100000 rows of the shuffled order"
+  },
+  "model": {
+    "dependent": "Diabetes_binary",
+    "numericCovariates": [
+      "HighBP",
+      "HighChol",
+      "BMI",
+      "PhysActivity",
+      "Sex",
+      "Age",
+      "Income"
+    ],
+    "categoricalCovariate": "GenHlth",
+    "genHlthLabels": {
+      "1": "1_excellent",
+      "2": "2_very_good",
+      "3": "3_good",
+      "4": "4_fair",
+      "5": "5_poor"
+    },
+    "coding": "Indicator, reference Last = 5_poor",
+    "p": 12
+  },
+  "numericFormat": "angka ditulis ulang dalam bentuk desimal terpendek (mis. 40.0 → 40); nilainya tidak berubah",
+  "statistics": {
+    "input": {
+      "rows": 253680,
+      "diabetesPositive": 35346,
+      "prevalence": 0.13933301797540207,
+      "genHlth": {
+        "1_excellent": 45299,
+        "2_very_good": 89084,
+        "3_good": 75646,
+        "4_fair": 31570,
+        "5_poor": 12081
+      }
+    },
+    "output": {
+      "rows": 100000,
+      "diabetesPositive": 13880,
+      "prevalence": 0.1388,
+      "genHlth": {
+        "1_excellent": 17854,
+        "2_very_good": 35169,
+        "3_good": 29842,
+        "4_fair": 12413,
+        "5_poor": 4722
+      }
+    },
+    "prefixes": {
+      "1000": {
+        "rows": 1000,
+        "diabetesPositive": 134,
+        "prevalence": 0.134,
+        "genHlth": {
+          "1_excellent": 184,
+          "2_very_good": 339,
+          "3_good": 305,
+          "4_fair": 129,
+          "5_poor": 43
+        }
+      },
+      "10000": {
+        "rows": 10000,
+        "diabetesPositive": 1413,
+        "prevalence": 0.1413,
+        "genHlth": {
+          "1_excellent": 1773,
+          "2_very_good": 3521,
+          "3_good": 2980,
+          "4_fair": 1256,
+          "5_poor": 470
+        }
+      },
+      "50000": {
+        "rows": 50000,
+        "diabetesPositive": 6939,
+        "prevalence": 0.13878,
+        "genHlth": {
+          "1_excellent": 8977,
+          "2_very_good": 17672,
+          "3_good": 14865,
+          "4_fair": 6148,
+          "5_poor": 2338
+        }
+      },
+      "100000": {
+        "rows": 100000,
+        "diabetesPositive": 13880,
+        "prevalence": 0.1388,
+        "genHlth": {
+          "1_excellent": 17854,
+          "2_very_good": 35169,
+          "3_good": 29842,
+          "4_fair": 12413,
+          "5_poor": 4722
+        }
+      }
+    }
+  },
+  "generatedAt": "2026-10-18T16:39:27.050Z",
+  "node": "v22.18.0"
+}
