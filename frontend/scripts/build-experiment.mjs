@@ -17,9 +17,13 @@
 // 4. frontend/next-env.d.ts dilacak git tetapi ditulis ulang oleh next dev/build (referensi distDir
 //    .next vs .next-dev). File buatan Next ini dikembalikan ke versi HEAD sebelum cek dan sesudah
 //    build, supaya tidak membuat working tree dirty.
+// 5. Setelah build sukses, .next/EXPERIMENT_BUILD.json mencatat gitCommit, commit HEAD lengkap, dan
+//    BUILD_ID Next. Preflight hari-H memakainya untuk memastikan build = HEAD dan tidak dirty, dan
+//    orkestrator mencatatnya di run.json dan session.json.
 import { execFileSync, spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -95,4 +99,18 @@ const result = spawnSync(process.execPath, [nextBin, "build"], {
   env: { ...process.env, NEXT_PUBLIC_GIT_COMMIT: commit },
 });
 restoreNextEnv("after the build");
+
+// 5. Info build (distDir production = .next, lihat next.config.js)
+if (result.status === 0) {
+  const dist = join(frontend, ".next");
+  const info = {
+    gitCommit: commit,
+    gitHead: git("rev-parse", "HEAD"),
+    nextBuildId: readFileSync(join(dist, "BUILD_ID"), "utf8").trim(),
+    builtAt: new Date().toISOString(),
+    allowDirty,
+  };
+  writeFileSync(join(dist, "EXPERIMENT_BUILD.json"), JSON.stringify(info, null, 2) + "\n");
+  console.log(`Wrote .next/EXPERIMENT_BUILD.json (${info.gitCommit}, BUILD_ID ${info.nextBuildId}).`);
+}
 process.exit(result.status ?? 1);

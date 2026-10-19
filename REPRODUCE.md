@@ -80,14 +80,14 @@ sumber:
 ## 4. Production build
 
 ```bash
-cd frontend
-npm run build:experiment
-cd ..
+npm run build:experiment        # dari root repo (sama dengan: cd frontend && npm run build:experiment)
 ```
 
 Build ditolak bila working tree dirty (file terlacak berubah); nilai `gitCommit` di setiap
-meta.json = `git describe --always --dirty --abbrev=8`. Jangan biarkan server lain memakai
-port 3002: orkestrator menyalakan `next start` sendiri di port itu.
+meta.json = `git describe --always --dirty --abbrev=8`. Build yang sukses menulis
+`frontend/.next/EXPERIMENT_BUILD.json` (gitCommit, commit HEAD, BUILD_ID); preflight hari-H
+menolak build yang bukan dari HEAD, jadi build ulang setiap kali ada commit baru. Jangan
+biarkan server lain memakai port 3002: orkestrator menyalakan `next start` sendiri di port itu.
 
 ## 5. Konfigurasi orkestrator
 
@@ -140,7 +140,41 @@ node tests/experiment/orchestrate.mjs --config tests/experiment/bench.v2.mini.js
 
 Validator harus mencetak **LULUS** dan cek native **PASS**. Hasil dry run bukan data artikel.
 
-## 8. Sesi ukur
+Alur hari-H (§8) bisa diuji dengan config yang sama ditambah 1 sesi pilot per browser (sekitar
+8 menit; runId `dry-…`):
+
+```bash
+npm run bench:day -- --phase pilot --dry
+npm run bench:day -- --phase measure --dry      # memakai run pilot dry terbaru
+```
+
+## 8. Sesi ukur (hari-H)
+
+Jalankan dari Windows Terminal biasa dengan VS Code dan aplikasi lain tertutup, dari root repo
+(perintah `npm run` yang sama juga bisa dari `frontend`). Perintahnya sama di Windows dan Linux.
+
+```bash
+npm run bench:preflight                                  # cek baca-saja: hijau/kuning/merah
+npm run bench:day -- --phase pilot                       # ±18 menit: 1 sesi pilot per browser
+npm run bench:day -- --phase measure --run-id <runId>    # ±3¼ jam: 10 sesi ukur per browser
+```
+
+- **Preflight** hanya membaca dan tidak mengubah pengaturan apa pun. Cek merah (mis. tidak
+  dicolok charger, working tree dirty, build bukan dari HEAD, port 3002 dipakai, file artefak
+  berubah) menghentikan `bench:day` sebelum sesi pertama. Cek kuning (updater browser aktif,
+  aplikasi pengganggu berjalan, mode daya bukan *Best performance*) hanya peringatan. Versi
+  Chrome dan Firefox disimpan di `benchmark-results/preflight-<waktu>.json`.
+- **Fase pilot** mencetak ringkasan, perkiraan durasi fase measure, dan perintah berikutnya
+  lengkap dengan runId. Baca `validation-pilot.md` sebelum lanjut.
+- **Fase measure** menjalankan 20 sesi ukur, native (10 invocation), validator seluruh run,
+  membandingkan versi browser setiap sesi dengan file preflight, lalu membuat
+  `benchmark-results/<runId>.zip`. Bila terputus, jalankan perintah yang sama lagi: sesi yang
+  sudah lengkap dan native yang sudah selesai dilewati. Fase ini menolak run yang validasi
+  pilotnya gagal (tambahkan `--force` untuk tetap lanjut).
+- Exit code 0 berarti semua langkah lulus. Seluruh output konsol juga ada di
+  `benchmark-results/<runId>/day.log`.
+
+Langkah yang sama secara manual (mis. untuk mengulang satu sesi):
 
 Windows (PowerShell):
 
@@ -148,6 +182,7 @@ Windows (PowerShell):
 node tests/experiment/orchestrate.mjs --plan                 # jadwal, seed, dan urutan workload
 node tests/experiment/orchestrate.mjs                        # runId = waktu mulai (dicetak di awal)
 node tests/experiment/orchestrate.mjs --run-id <runId>       # lanjutkan bila terputus; sesi lengkap dilewati
+node tests/experiment/orchestrate.mjs --run-id <runId> --role pilot        # hanya sesi pilot (atau measure)
 node tests/experiment/orchestrate.mjs --run-id <runId> --only firefox-04   # ulangi satu sesi
 cd frontend
 node scripts/runNative.mjs ..\benchmark-results\<runId>      # 10 proses native, jeda 10 s
@@ -160,6 +195,7 @@ Linux (bash):
 node tests/experiment/orchestrate.mjs --plan
 node tests/experiment/orchestrate.mjs
 node tests/experiment/orchestrate.mjs --run-id <runId>
+node tests/experiment/orchestrate.mjs --run-id <runId> --role pilot
 node tests/experiment/orchestrate.mjs --run-id <runId> --only firefox-04
 (cd frontend && node scripts/runNative.mjs ../benchmark-results/<runId>)
 (cd frontend && node scripts/validateRun.mjs ../benchmark-results/<runId>)
@@ -178,7 +214,12 @@ benchmark-results/<runId>/
       session.json                  host, browser.version(), argumen peluncuran, user.js Firefox,
                                     status foreground jendela per batch, waktu, status, error
   native/invocation-01.csv … -10.csv, native.json            pembanding native + hasil cek vs D-warm
-  validation.md, validation.json                             hasil validateRun.mjs
+  validation.md, validation.json                             hasil validateRun.mjs (seluruh run)
+  validation-pilot.md, validation-pilot.json                 hasil validateRun.mjs --role pilot
+  day.log, day.json                 output konsol bench:day dan status setiap langkah per fase
+  preflight-pilot.json, preflight-measure.json               salinan hasil preflight tiap fase
+benchmark-results/<runId>.zip       arsip folder run (dibuat fase measure)
+benchmark-results/preflight-<waktu>.json                     setiap hasil preflight
 ```
 
 Kolom CSV dan field meta.json: EXPERIMENT.md §5. `benchmark-results/` ada di `.gitignore`.

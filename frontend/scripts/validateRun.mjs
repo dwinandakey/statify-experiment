@@ -1,8 +1,10 @@
 // Validasi satu run orkestrator eksperimen v2 (Tugas 8), lintas-OS.
 //
 //   node scripts/validateRun.mjs <runDir> [--out <file.md>]
+//   node scripts/validateRun.mjs <runDir> --role pilot     hanya sesi pilot (validation-pilot.md/.json)
 //
-// <runDir> = benchmark-results/<runId>. Untuk setiap sesi di run.json:
+// <runDir> = benchmark-results/<runId>. Untuk setiap sesi di run.json (atau sesi dengan peran
+// --role saja; sesi peran lain tidak dianggap hilang):
 //   - session.json status done, setiap workload punya CSV + meta.json berstatus done;
 //   - jumlah run per (workload, N, sel) = repetisi; tidak ada error; pageHidden selalu false;
 //     clockCheckFailed tidak pernah true;
@@ -114,8 +116,8 @@ export function maxCoefDiff(rows, ref) {
   return { beta, se };
 }
 
-function loadSessions(runDir, run) {
-  return run.schedule
+function loadSessions(runDir, schedule) {
+  return schedule
     .map((s) => ({ ...s, path: join(runDir, s.dir) }))
     .filter((s) => existsSync(join(s.path, "session.json")))
     .map((s) => {
@@ -134,13 +136,14 @@ function loadSessions(runDir, run) {
     });
 }
 
-export function validateRun(runDir) {
+export function validateRun(runDir, { role = null } = {}) {
   const run = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
   const cfg = run.config;
   const cells = cfg.lifecycle === "interleaved" ? CELL_ORDER : CELL_ORDER.filter((c) => !c.endsWith(cfg.lifecycle === "per-run" ? "-warm" : "-cold"));
   const expected = { repetitions: cfg.repetitions, sizes: cfg.sizes, cells };
-  const sessions = loadSessions(runDir, run);
-  const missing = run.schedule.filter((s) => !sessions.some((x) => x.id === s.id)).map((s) => s.id);
+  const schedule = role ? run.schedule.filter((s) => s.role === role) : run.schedule;
+  const sessions = loadSessions(runDir, schedule);
+  const missing = schedule.filter((s) => !sessions.some((x) => x.id === s.id)).map((s) => s.id);
   const violations = [];
   const info = [];
   if (missing.length) violations.push(`run: sessions without output: ${missing.join(", ")}`);
@@ -246,7 +249,7 @@ export function validateRun(runDir) {
       }
     }
   }
-  return { runId: run.runId, config: cfg, sessions, violations, info, agreement, medians, deviations, cells, viewports };
+  return { runId: run.runId, role, config: cfg, sessions, violations, info, agreement, medians, deviations, cells, viewports };
 }
 
 /** "innerWidth×innerHeight @DPR" dari meta.environment (CSS px; DPR 3 desimal). */
@@ -274,7 +277,7 @@ const f = (v, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : "–");
 const dur = (ms) => (Number.isFinite(ms) ? `${Math.floor(ms / 60000)}m${String(Math.round((ms % 60000) / 1000)).padStart(2, "0")}s` : "–");
 
 export function renderMarkdown(r) {
-  const lines = [`# Validasi run ${r.runId}`, ""];
+  const lines = [`# Validasi run ${r.runId}${r.role ? ` (hanya sesi ${r.role})` : ""}`, ""];
   lines.push(`Hasil: **${r.violations.length === 0 ? "LULUS" : `${r.violations.length} pelanggaran`}**`, "");
   lines.push(
     "## Sesi",
@@ -319,22 +322,35 @@ export function renderMarkdown(r) {
   return lines.join("\n") + "\n";
 }
 
+function parseArgs(argv) {
+  const a = { runDir: null, out: null, role: null };
+  for (let i = 0; i < argv.length; i++) {
+    const k = argv[i];
+    if (k === "--out") a.out = argv[++i];
+    else if (k === "--role") a.role = argv[++i];
+    else if (!k.startsWith("--") && a.runDir === null) a.runDir = resolve(k);
+    else return null;
+  }
+  return a.runDir && existsSync(join(a.runDir, "run.json")) && [null, "pilot", "measure"].includes(a.role) ? a : null;
+}
+
 function main() {
-  const args = process.argv.slice(2);
-  const outIdx = args.indexOf("--out");
-  const runDir = resolve(args.find((a, i) => !a.startsWith("--") && (outIdx < 0 || i !== outIdx + 1)) ?? "");
-  if (!existsSync(join(runDir, "run.json"))) {
-    console.error("Usage: node scripts/validateRun.mjs <benchmark-results/<runId>> [--out file.md]");
+  const args = parseArgs(process.argv.slice(2));
+  if (!args) {
+    console.error("Usage: node scripts/validateRun.mjs <benchmark-results/<runId>> [--role pilot|measure] [--out file.md]");
     process.exit(2);
   }
-  const r = validateRun(runDir);
+  const { runDir } = args;
+  const r = validateRun(runDir, { role: args.role });
   const md = renderMarkdown(r);
-  writeFileSync(outIdx >= 0 ? resolve(args[outIdx + 1]) : join(runDir, "validation.md"), md);
+  const base = args.role ? `validation-${args.role}` : "validation";
+  writeFileSync(args.out ? resolve(args.out) : join(runDir, `${base}.md`), md);
   writeFileSync(
-    join(runDir, "validation.json"),
+    join(runDir, `${base}.json`),
     JSON.stringify(
       {
         runId: r.runId,
+        role: r.role,
         passed: r.violations.length === 0,
         violations: r.violations,
         info: [...new Set(r.info)],

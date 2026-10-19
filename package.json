@@ -13,7 +13,10 @@
     "test:e2e": "playwright test --config=testing/e2e/playwright.config.ts",
     "test:load:sav": "k6 run load-tests/backend/sav-apis-test.js",
     "install:all": "npm install --workspaces",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package",
+    "build:experiment": "npm run build:experiment --workspace=frontend",
+    "bench:preflight": "node frontend/scripts/preflight.mjs",
+    "bench:day": "node frontend/scripts/benchDay.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.54.1",

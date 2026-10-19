@@ -6,8 +6,12 @@
 //   node tests/experiment/orchestrate.mjs                               run baru (runId = waktu mulai)
 //   node tests/experiment/orchestrate.mjs --run-id 20261019-090000      lanjutkan run: sesi lengkap dilewati
 //   node tests/experiment/orchestrate.mjs --run-id <id> --only chrome-03   ulangi satu sesi
+//   node tests/experiment/orchestrate.mjs --run-id <id> --role pilot   hanya sesi pilot (atau measure)
 //   node tests/experiment/orchestrate.mjs --config tests/experiment/bench.v2.mini.json
 //   node tests/experiment/orchestrate.mjs --plan                        tampilkan jadwal saja
+// Hari-H memakai frontend/scripts/benchDay.mjs (preflight, --role pilot/measure, native, validator).
+// Run yang dilanjutkan harus memakai config yang sama dengan run.json. Bila sesi terakhir run itu
+// selesai kurang dari cooldownSec lalu, sesi pertama ditunda sampai cooldown terpenuhi.
 //
 // Konfigurasi: tests/experiment/bench.v2.json. Output: <outputDir>/<runId>/
 //   run.json                         konfigurasi, jadwal, build, dataset, versi alat, ringkasan
@@ -30,6 +34,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import net from "node:net";
 import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -153,11 +158,41 @@ export function runsPerBatch(cfg) {
   return cfg.sizes.length * (cfg.warmup + cfg.repetitions) * cells;
 }
 
+/** JSON dengan kunci objek terurut, untuk membandingkan config tanpa bergantung urutan kunci. */
+export function stableStringify(value) {
+  return JSON.stringify(value, (_, v) =>
+    v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : v
+  );
+}
+
+/** Kunci config tingkat atas yang berbeda (description diabaikan). */
+export function configDiff(a, b) {
+  const keys = [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])].filter((k) => k !== "description");
+  return keys.filter((k) => stableStringify(a?.[k]) !== stableStringify(b?.[k])).sort();
+}
+
+/** Waktu (ms epoch) sesi terakhir run ini selesai, dari session.json setiap sesi jadwal; null bila belum ada. */
+export function lastSessionFinishedAt(runDir, schedule) {
+  let last = null;
+  for (const s of schedule) {
+    const p = join(runDir, s.dir, "session.json");
+    if (!existsSync(p)) continue;
+    try {
+      const t = Date.parse(JSON.parse(readFileSync(p, "utf8")).finishedAt);
+      if (Number.isFinite(t) && (last === null || t > last)) last = t;
+    } catch {
+      // session.json rusak: diabaikan
+    }
+  }
+  return last;
+}
+
 // --- Alat bantu ---
 
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const stamp = () => new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+/** runId bawaan: waktu mulai UTC, mis. 20261019-090000. */
+export const stamp = () => new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
 
 function fmtDuration(ms) {
   if (!Number.isFinite(ms)) return "?";
@@ -263,7 +298,24 @@ async function httpOk(url) {
   }
 }
 
-async function startServer(cfg) {
+/** Ada proses yang menerima koneksi TCP di host:port baseUrl? */
+export function portInUse(baseUrl, timeoutMs = 2000) {
+  const u = new URL(baseUrl);
+  const port = Number(u.port || (u.protocol === "https:" ? 443 : 80));
+  return new Promise((done) => {
+    const socket = net.connect({ host: u.hostname, port });
+    const finish = (inUse) => {
+      socket.destroy();
+      done(inUse);
+    };
+    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
+/** `next start` production build di port baseUrl (dipakai orkestrator dan preflight). */
+export async function startServer(cfg) {
   const port = new URL(cfg.baseUrl).port || "80";
   if (await httpOk(cfg.baseUrl)) {
     throw new Error(`${cfg.baseUrl} is already in use. Stop that server or set "startServer": false to reuse it.`);
@@ -276,6 +328,19 @@ async function startServer(cfg) {
   }
   child.kill();
   throw new Error(`next start did not answer on ${cfg.baseUrl} within 120 s`);
+}
+
+/** Matikan server dari startServer dan tunggu port kosong lagi; false bila port masih dipakai. */
+export async function stopServer(child, cfg, timeoutMs = 15_000) {
+  if (child.exitCode === null && child.signalCode === null) {
+    const exited = new Promise((r) => child.once("exit", r));
+    child.kill();
+    await Promise.race([exited, sleep(timeoutMs)]);
+  }
+  for (const t0 = Date.now(); Date.now() - t0 < timeoutMs; await sleep(250)) {
+    if (!(await portInUse(cfg.baseUrl))) return true;
+  }
+  return false;
 }
 
 // --- Satu browser: buka aplikasi, impor dataset, pilih variabel ---
@@ -397,6 +462,7 @@ async function runSession(cfg, s, runDir, sessionDir, info) {
     tools: info.tools,
     git: info.git,
     buildId: info.buildId,
+    build: info.build,
     baseUrl: cfg.baseUrl,
     batches: [],
     consoleErrors: [],
@@ -543,16 +609,28 @@ async function exportDesigns(cfg, runDir, info) {
 // --- Main ---
 
 function parseArgs(argv) {
-  const args = { config: "tests/experiment/bench.v2.json", runId: null, only: null, plan: false };
+  const args = { config: "tests/experiment/bench.v2.json", runId: null, only: null, role: null, plan: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--config") args.config = argv[++i];
     else if (a === "--run-id") args.runId = argv[++i];
     else if (a === "--only") args.only = argv[++i];
+    else if (a === "--role") args.role = argv[++i];
     else if (a === "--plan") args.plan = true;
     else throw new Error(`Unknown argument ${a}`);
   }
+  if (args.role !== null && !["pilot", "measure"].includes(args.role)) throw new Error(`--role must be pilot or measure, got ${args.role}`);
   return args;
+}
+
+/** .next/EXPERIMENT_BUILD.json dari `npm run build:experiment` (null untuk build lama). */
+function buildInfo() {
+  const p = join(FRONTEND, ".next", "EXPERIMENT_BUILD.json");
+  try {
+    return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+  } catch {
+    return null;
+  }
 }
 
 async function main() {
@@ -567,6 +645,12 @@ async function main() {
 
   const runId = args.runId ?? stamp();
   const runDir = resolve(REPO, cfg.outputDir, runId);
+  const runJsonPath = join(runDir, "run.json");
+  const previous = existsSync(runJsonPath) ? JSON.parse(readFileSync(runJsonPath, "utf8")) : null;
+  if (previous?.config) {
+    const diff = configDiff(previous.config, cfg);
+    if (diff.length) throw new Error(`${args.config} differs from ${runJsonPath} in: ${diff.join(", ")}. Resume a run with the config it started with.`);
+  }
   mkdirSync(runDir, { recursive: true });
 
   // Pemeriksaan awal: browser, dataset (SHA-256 vs manifest), build
@@ -589,11 +673,12 @@ async function main() {
     tools: { node: process.version, puppeteer: require("puppeteer-core/package.json").version },
     git: gitInfo(),
     buildId: readFileSync(buildIdPath, "utf8").trim(),
+    build: buildInfo(),
   };
   if (info.git.describe?.endsWith("-dirty")) log("WARNING: the working tree is dirty; the build may not match HEAD.");
+  if (info.build && info.build.gitHead !== info.git.head) log(`WARNING: the build is from ${info.build.gitCommit}, HEAD is ${info.git.describe}.`);
 
-  const runJsonPath = join(runDir, "run.json");
-  const runJson = existsSync(runJsonPath) ? JSON.parse(readFileSync(runJsonPath, "utf8")) : { runId, invocations: [] };
+  const runJson = previous ?? { runId, invocations: [] };
   runJson.config = cfg;
   runJson.schedule = schedule;
   runJson.dataset = { path: cfg.datasetPath, sha256: datasetSha, manifestSha256: manifestSha };
@@ -601,23 +686,26 @@ async function main() {
   writeFileSync(runJsonPath, JSON.stringify(runJson, null, 2) + "\n");
 
   let server = null;
-  const stopServer = () => {
+  const killServer = () => {
     if (server && !server.killed) server.kill();
   };
   process.on("SIGINT", () => {
-    stopServer();
+    killServer();
     process.exit(130);
   });
   try {
     if (cfg.startServer) {
-      log(`server: next start on ${cfg.baseUrl} (build ${info.buildId}, ${info.git.describe})`);
+      log(`server: next start on ${cfg.baseUrl} (build ${info.buildId}, ${info.build?.gitCommit ?? `HEAD ${info.git.describe}`})`);
       server = await startServer(cfg);
     }
     await exportDesigns(cfg, runDir, info);
 
-    const todo = schedule.filter((s) => (args.only ? s.id === args.only : true));
+    const todo = schedule.filter((s) => (args.only ? s.id === args.only : true) && (args.role ? s.role === args.role : true));
     const results = [];
     const durations = [];
+    // Cooldown juga berlaku terhadap sesi terakhir invocation sebelumnya (fase pilot → measure, resume)
+    const lastFinished = lastSessionFinishedAt(runDir, schedule);
+    let first = true;
     for (const [i, s] of todo.entries()) {
       const sessionDir = join(runDir, s.dir);
       if (args.only && existsSync(sessionDir)) {
@@ -629,6 +717,14 @@ async function main() {
       } else if (existsSync(sessionDir)) {
         renameSync(sessionDir, `${sessionDir}.incomplete-${stamp()}`);
       }
+      if (first && lastFinished !== null) {
+        const waitMs = cfg.cooldownSec * 1000 - (Date.now() - lastFinished);
+        if (waitMs > 0) {
+          log(`cooldown ${Math.ceil(waitMs / 1000)} s (the previous session of this run finished ${Math.round((Date.now() - lastFinished) / 1000)} s ago)`);
+          await sleep(waitMs);
+        }
+      }
+      first = false;
       log(`[${i + 1}/${todo.length}] ${s.id}: ${s.browser}, ${s.role}, orderSeed ${s.orderSeed}, workloads ${s.workloads.join(" → ")}`);
       const rec = await runSession(cfg, s, runDir, sessionDir, info);
       durations.push(rec.durationMs);
@@ -654,7 +750,7 @@ async function main() {
     console.log(`\nOutput: ${runDir}`);
     if (results.some((r) => r.status === "error")) process.exitCode = 1;
   } finally {
-    stopServer();
+    killServer();
   }
 }
 

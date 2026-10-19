@@ -3,7 +3,8 @@
  * - salinan mulberry32/deriveSeed/shuffleInPlace dan urutan workload identik dengan services/prng.ts;
  * - jadwal selang-seling pilot-chrome, pilot-firefox, chrome-01, firefox-01, … dengan
  *   orderSeed = orderSeedBase + indeks global;
- * - deteksi sesi lengkap untuk resume; jumlah run per batch.
+ * - deteksi sesi lengkap untuk resume; jumlah run per batch;
+ * - resume: perbandingan config dengan run.json dan waktu selesai sesi terakhir (cooldown).
  * Skrip berupa ES module, jadi dijalankan di proses Node terpisah.
  */
 import { execFileSync } from "node:child_process";
@@ -62,6 +63,38 @@ test("runsPerBatch: 4 N × (5 + 30) × 6 sel = 840; dry run 2 × 3 × 6 = 36", (
       m.runsPerBatch(m.loadConfig(${JSON.stringify(path.join(repo, "tests/experiment"))} + "/" + f)))));
   `);
   expect(runs).toEqual([840, 36]);
+});
+
+test("resume: config dibandingkan per kunci tanpa bergantung urutan kunci; description diabaikan", () => {
+  const diff = withModule<string[][]>(`
+    const a = { description: "a", sizes: [1000, 10000], window: { mode: "maximized" }, browsers: [{ name: "chrome", executablePath: "c" }], cooldownSec: 120 };
+    const b = { cooldownSec: 120, browsers: [{ executablePath: "c", name: "chrome" }], window: { mode: "maximized" }, sizes: [1000, 10000], description: "b" };
+    console.log(JSON.stringify([m.configDiff(a, b), m.configDiff(a, { ...b, sizes: [1000], cooldownSec: 10, extra: 1 })]));
+  `);
+  expect(diff).toEqual([[], ["cooldownSec", "extra", "sizes"]]);
+});
+
+test("cooldown saat resume: waktu selesai sesi terakhir dari session.json sesi di jadwal", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orchestrate-"));
+  try {
+    const schedule = [
+      { id: "pilot-chrome", dir: "chrome/pilot-01" },
+      { id: "pilot-firefox", dir: "firefox/pilot-01" },
+      { id: "chrome-01", dir: "chrome/measure-01" },
+    ];
+    const last = () => withModule<number | null>(`console.log(JSON.stringify(m.lastSessionFinishedAt(${JSON.stringify(dir)}, ${JSON.stringify(schedule)})));`);
+    expect(last()).toBeNull();
+    const put = (d: string, finishedAt: string | null) => {
+      fs.mkdirSync(path.join(dir, d), { recursive: true });
+      fs.writeFileSync(path.join(dir, d, "session.json"), JSON.stringify({ status: "done", finishedAt }));
+    };
+    put("chrome/pilot-01", "2026-10-19T01:00:00.000Z");
+    put("firefox/pilot-01", "2026-10-19T01:08:00.000Z");
+    put("chrome/measure-01", null); // sesi yang terputus sebelum selesai
+    expect(last()).toBe(Date.parse("2026-10-19T01:08:00.000Z"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("sesi lengkap untuk resume: status done dan berkas setiap workload ada", () => {

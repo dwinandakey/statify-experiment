@@ -18,7 +18,9 @@
     "test:descriptive:worker": "jest components/Modals/Analyze/Descriptive/Descriptive/__tests__/DescriptiveWorkerConnection.test.ts components/Modals/Analyze/Descriptive/Descriptive/__tests__/DescriptivesWorkerIntegration.test.ts --verbose",
     "build:wasm": "powershell -Command \"cd components/Modals/Analyze/TimeSeries/wasm; wasm-pack build --target web; Copy-Item -Path pkg/timeseries* -Destination ../../../../../public/workers/TimeSeries/ -Force\"",
     "build:experiment": "node scripts/build-experiment.mjs",
-    "build:wasm:experiment": "node scripts/build-wasm-experiment.mjs"
+    "build:wasm:experiment": "node scripts/build-wasm-experiment.mjs",
+    "bench:preflight": "node scripts/preflight.mjs",
+    "bench:day": "node scripts/benchDay.mjs"
   },
   "dependencies": {
     "@handsontable/react-wrapper": "^15.3.0",

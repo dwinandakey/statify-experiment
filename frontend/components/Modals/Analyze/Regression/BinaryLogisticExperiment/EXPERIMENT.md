@@ -781,8 +781,15 @@ repo. Ringkasnya:
      Puppeteer, `browser.version()`, argumen peluncuran lengkap, `user.js` Firefox, waktu,
      status, error). Konfigurasi, jadwal, build, dan SHA-256 dataset ada di `run.json`.
    - Cooldown 120 detik antar sesi. Sesi yang sudah lengkap dilewati bila run dilanjutkan
-     (`--run-id <id>`); `--only chrome-03` mengulang satu sesi (output lama diganti nama).
-     Sesi gagal dicatat lalu sesi berikutnya tetap dijalankan. Timeout per batch 45 menit.
+     (`--run-id <id>`); `--only chrome-03` mengulang satu sesi (output lama diganti nama);
+     `--role pilot|measure` membatasi ke sesi satu peran. Sesi gagal dicatat lalu sesi
+     berikutnya tetap dijalankan. Timeout per batch 45 menit.
+   - Run yang dilanjutkan harus memakai config yang sama dengan `run.json` (selain itu
+     orkestrator berhenti). Cooldown juga berlaku antar-invocation: bila sesi terakhir run itu
+     selesai kurang dari 120 detik lalu (mis. fase pilot langsung disusul fase measure), sesi
+     pertama ditunda sampai 120 detik terpenuhi.
+   - Info build `.next/EXPERIMENT_BUILD.json` (ditulis `npm run build:experiment`: gitCommit,
+     commit HEAD, BUILD_ID) dicatat di `run.json` dan `session.json`.
    - Sebelum sesi pertama, design matrix workload core tiap N diekspor ke `design/` untuk
      pembanding native.
 4. **Native**: `cd frontend && node scripts/runNative.mjs ../benchmark-results/<runId>`
@@ -802,6 +809,23 @@ repo. Ringkasnya:
 6. Dry run sebelum run sungguhan: `--config tests/experiment/bench.v2.mini.json` (2 N, warm-up 1,
    ulangan 2, tanpa pilot, satu sesi per browser), lalu validator dan
    `runNative.mjs --invocations 1`. Hasil dry run bukan data artikel.
+7. **Hari-H** (`frontend/scripts/preflight.mjs`, `frontend/scripts/benchDay.mjs`) menjalankan
+   langkah 3–5 dalam dua perintah, dengan seluruh output konsol juga di
+   `benchmark-results/<runId>/day.log`:
+   - `npm run bench:preflight`: cek baca-saja (charger dan mode daya, versi browser, updater,
+     git bersih, build = HEAD tanpa `-dirty`, ARTIFACT_HASHES.json dan biner .wasm, dataset,
+     server dengan COOP/COEP, proses pengganggu, disk ≥ 5 GB), hijau/kuning/merah, exit 1 bila
+     ada merah. Versi browser disimpan di `benchmark-results/preflight-<waktu>.json`.
+   - `npm run bench:day -- --phase pilot`: preflight (merah = berhenti sebelum sesi pertama),
+     orkestrator `--role pilot`, validator sesi pilot (`validation-pilot.md`), ringkasan,
+     perkiraan durasi fase measure, dan perintah berikutnya.
+   - `npm run bench:day -- --phase measure --run-id <runId>`: preflight, orkestrator
+     `--role measure` (perintah yang sama melanjutkan run yang terputus), native 10 invocation,
+     validator seluruh run, versi browser setiap sesi = versi di file preflight pilot dan measure,
+     lalu `benchmark-results/<runId>.zip`. Fase ini menolak run yang validasi pilotnya gagal,
+     kecuali dengan `--force`.
+   - `--dry` menguji alur yang sama dengan config mini (ditambah 1 sesi pilot per browser,
+     runId `dry-…`, native 2 invocation).
 
 ## 10. Keterbatasan
 
