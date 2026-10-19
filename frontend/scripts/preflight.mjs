@@ -24,8 +24,9 @@
 //   dan COEP require-corp (crossOriginIsolated = true), dan .wasm yang dilayani = biner yang diukur.
 // - Proses pengganggu (kuning): VS Code, OneDrive, Teams, Discord, browser lain.
 // - Ruang disk kosong di drive output ≥ 5 GB.
-// Hasil dicetak dan disimpan ke <outputDir>/preflight-<waktu UTC>.json. Exit code 1 bila ada cek
-// merah. Cek khusus Windows (daya, updater) berstatus kuning "tidak dicek" di OS lain.
+// Hasil dicetak dan disimpan ke <outputDir>/preflight-<waktu UTC>.json (--dry: preflight-dry-…).
+// Exit code 1 bila ada cek merah. Cek khusus Windows (daya, updater) berstatus kuning "tidak
+// dicek" di OS lain.
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
@@ -423,7 +424,7 @@ async function main() {
 
   const summary = { ok: 0, warn: 0, fail: 0 };
   for (const c of checks) summary[c.status]++;
-  const outFile = args.out ? resolve(args.out) : join(outDir, `preflight-${stamp()}.json`);
+  const outFile = args.out ? resolve(args.out) : join(outDir, `preflight-${args.dry ? "dry-" : ""}${stamp()}.json`);
   mkdirSync(dirname(outFile), { recursive: true });
   const result = {
     createdAt: createdAt.toISOString(),
