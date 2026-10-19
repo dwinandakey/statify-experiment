@@ -187,6 +187,11 @@ export function lastSessionFinishedAt(runDir, schedule) {
   return last;
 }
 
+/** Sisa cooldown (ms) sebelum sesi pertama invocation ini; 0 bila tidak perlu menunggu. */
+export function cooldownRemainingMs(lastFinished, cooldownSec, now = Date.now()) {
+  return lastFinished === null ? 0 : Math.max(0, cooldownSec * 1000 - (now - lastFinished));
+}
+
 // --- Alat bantu ---
 
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
@@ -717,8 +722,8 @@ async function main() {
       } else if (existsSync(sessionDir)) {
         renameSync(sessionDir, `${sessionDir}.incomplete-${stamp()}`);
       }
-      if (first && lastFinished !== null) {
-        const waitMs = cfg.cooldownSec * 1000 - (Date.now() - lastFinished);
+      if (first) {
+        const waitMs = cooldownRemainingMs(lastFinished, cfg.cooldownSec);
         if (waitMs > 0) {
           log(`cooldown ${Math.ceil(waitMs / 1000)} s (the previous session of this run finished ${Math.round((Date.now() - lastFinished) / 1000)} s ago)`);
           await sleep(waitMs);

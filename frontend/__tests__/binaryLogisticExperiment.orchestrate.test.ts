@@ -92,6 +92,11 @@ test("cooldown saat resume: waktu selesai sesi terakhir dari session.json sesi d
     put("firefox/pilot-01", "2026-10-19T01:08:00.000Z");
     put("chrome/measure-01", null); // sesi yang terputus sebelum selesai
     expect(last()).toBe(Date.parse("2026-10-19T01:08:00.000Z"));
+    const t = Date.parse("2026-10-19T01:08:00.000Z");
+    const waits = withModule<number[]>(
+      `console.log(JSON.stringify([m.cooldownRemainingMs(null, 120, ${t}), m.cooldownRemainingMs(${t}, 120, ${t + 30_000}), m.cooldownRemainingMs(${t}, 120, ${t + 200_000})]));`
+    );
+    expect(waits).toEqual([0, 90_000, 0]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

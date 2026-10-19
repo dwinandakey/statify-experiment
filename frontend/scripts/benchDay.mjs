@@ -466,14 +466,8 @@ async function main() {
     phase.versions = { passed: versions.passed, problems: versions.problems };
     saveDay();
 
-    // Zip
-    say(`\n━━ Zip ━━`);
+    // Ringkasan dulu, lalu zip: day.log dan day.json di dalam arsip sudah memuat ringkasan
     const zipPath = join(results, `${runId}.zip`);
-    const zip = writeZip(runDir, zipPath, runId);
-    phase.zip = { path: rel(zipPath), ...zip };
-    say(`${rel(zipPath)}: ${zip.files} file, ${(zip.bytes / 1024 ** 2).toFixed(1)} MB, SHA-256 ${zip.sha256}`);
-    saveDay();
-
     const measured = sessionStates(runDir, schedule, "measure");
     const done = measured.filter((s) => s.complete);
     const ok = {
@@ -489,7 +483,7 @@ async function main() {
     say(`Native        : ${native ? `${native.check?.passed ? "PASS" : "FAIL"} (${native.invocations?.length} invocation)` : "tidak ada hasil"}`);
     say(`Validator     : ${validation ? (validation.passed ? "LULUS" : `${validation.violations.length} pelanggaran`) : "tidak ada hasil"} (${rel(join(runDir, "validation.md"))})`);
     say(`Versi browser : ${versions.passed ? "sama dengan preflight" : "BERBEDA (lihat di atas)"}`);
-    say(`Arsip         : ${rel(zipPath)} (SHA-256 ${zip.sha256.slice(0, 16)}…)`);
+    say(`Arsip         : ${rel(zipPath)} (SHA-256 di bawah dan di day.json)`);
     say("\nLangkah berikutnya:");
     if (passed) {
       say(`  Salin ${rel(zipPath)} ke penyimpanan permanen dan catat SHA-256-nya; benchmark-results/ tidak di-commit.`);
@@ -498,6 +492,13 @@ async function main() {
       say(`  Ulangi sesi yang bermasalah: node tests/experiment/orchestrate.mjs --config ${cfgArg} --run-id ${runId} --only <sesi>`);
       say(`  lalu jalankan lagi: npm run bench:day -- --phase measure --run-id ${runId}${dryFlag} (sesi lengkap dan native dilewati).`);
     }
+    phase.passed = passed;
+    saveDay();
+
+    say(`\n━━ Zip ━━`);
+    const zip = writeZip(runDir, zipPath, runId);
+    phase.zip = { path: rel(zipPath), ...zip };
+    say(`${rel(zipPath)}: ${zip.files} file, ${(zip.bytes / 1024 ** 2).toFixed(1)} MB, SHA-256 ${zip.sha256}`);
     return finish(passed ? 0 : 1);
   };
 
