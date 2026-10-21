@@ -202,8 +202,9 @@ export const BinaryLogisticExperimentMain = ({ onClose }: BaseModalProps) => {
       <div className="px-6 py-3 border-t border-border flex flex-wrap items-center justify-between gap-2 bg-secondary flex-shrink-0">
         <div className="min-w-0 text-xs text-muted-foreground">
           <div data-testid="bl-exp-ok-config">
-            OK: {MODES[mode].label} · Enter · default options ·{" "}
-            {includeSpss ? "SPSS tables + performance" : "performance only"}
+            OK: {MODES[mode].label}
+            {MODES[mode].location === "worker" ? (coldWorkers ? " (per-run worker)" : " (persistent worker)") : ""} · Enter ·
+            default options · {includeSpss ? "SPSS tables + performance" : "performance only"}
           </div>
           {lastOk && (
             <div data-testid="bl-exp-ok-status" data-count={lastOk.count}>

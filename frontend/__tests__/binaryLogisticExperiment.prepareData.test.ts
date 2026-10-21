@@ -5,18 +5,31 @@
  * resampling ber-seed.
  */
 import type { Variable } from "@/types/Variable";
+import fs from "node:fs";
+import path from "node:path";
 import {
+  checkSizes,
   encodeCategorical,
   encodeDependent,
+  prefixFull,
   prepareExperimentData,
   resample,
   resampleFull,
+  sampleDataset,
+  sampleFull,
+  takePrefix,
 } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/prepareData";
 import {
+  cellOrderRng,
   deriveSeed,
   mulberry32,
   shuffleInPlace,
+  shuffledSizes,
+  shuffledWorkloads,
 } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/prng";
+import { normalizeBatchSettings } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/settings";
+import { CELLS, cellsFor } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/types/experiment";
+import { sizeOrderFor } from "@/components/Modals/Analyze/Regression/BinaryLogisticExperiment/services/runner";
 
 jest.mock("@/stores/useDataStore", () => ({ useDataStore: { getState: () => ({ data: [] }) } }));
 jest.mock("@/stores/useVariableStore", () => ({ useVariableStore: { getState: () => ({ variables: [] }) } }));
@@ -270,5 +283,143 @@ describe("prng", () => {
       shuffleInPlace(["A", "B", "C", "D"], rng).forEach((m, pos) => counts[m][pos]++);
     }
     for (const m of Object.keys(counts)) for (const c of counts[m]) expect(c).toBeGreaterThan(850);
+  });
+});
+
+
+describe("resample (v1) tidak berubah", () => {
+  test("golden kecil: seed 42, n = 5, N = 12 (dicatat dari implementasi v1 sebelum v2)", () => {
+    const X = Float64Array.from([1, 10, 1, 20, 1, 30, 1, 40, 1, 50]);
+    const y = Float64Array.from([0, 1, 0, 1, 1]);
+    const r = resample(X, y, 5, 2, 12, 42);
+    expect(Array.from(r.X).filter((_, i) => i % 2 === 1)).toEqual([40, 30, 50, 40, 10, 30, 20, 40, 50, 30, 20, 50]);
+    expect(Array.from(r.y)).toEqual([1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1]);
+    expect(r.sampling).toBe("resample");
+  });
+});
+
+describe("sampling prefix (v2)", () => {
+  const data = [
+    [1, 380, 3.61, 3, "a"],
+    [0, 660, 3.67, 3, "b"],
+    [1, 800, 4.0, 1, "c"],
+    [0, 640, 3.19, 4, "d"],
+    [1, 520, 2.93, 4, "e"],
+    [0, 760, 3.0, 2, "f"],
+    [1, 560, 2.98, 1, "g"],
+  ];
+  const prep = prepareExperimentData(data, vars, vars[0], [vars[1], vars[3]]);
+
+  test("N baris pertama tanpa pengembalian; core dan full memakai baris yang sama persis", () => {
+    const core = sampleDataset(prep, 4, "prefix", 99);
+    const full = sampleFull(prep.full, 4, "prefix", 99);
+    expect(core.sampling).toBe("prefix");
+    expect(core.resampled).toBe(false);
+    expect(Array.from(core.X)).toEqual(Array.from(prep.X.subarray(0, 4 * prep.p)));
+    expect(Array.from(core.y)).toEqual([1, 0, 1, 0]);
+    expect(full.rows).toBe(4);
+    expect(Array.from(full.y)).toEqual(Array.from(core.y));
+    for (let i = 0; i < 4; i++) {
+      // gre: kolom 0 input full = kolom 1 design matrix (setelah intercept)
+      expect(full.X[i * full.cols]).toBe(core.X[i * prep.p + 1]);
+      expect(full.X[i * full.cols + 1]).toBe(prep.full.X[i * prep.full.cols + 1]);
+    }
+    expect(full.modelInfo.n_samples).toBe(4);
+    expect(full.modelInfo.n_missing).toBe(0);
+  });
+
+  test("N = n → data asli apa adanya; seed tidak berpengaruh", () => {
+    expect(sampleDataset(prep, prep.n, "prefix", 1).X).toBe(prep.X);
+    expect(prefixFull(prep.full, prep.n)).toBe(prep.full);
+    expect(Array.from(sampleDataset(prep, 3, "prefix", 1).X)).toEqual(Array.from(sampleDataset(prep, 3, "prefix", 2).X));
+  });
+
+  test("N > n ditolak dengan pesan jelas, juga lewat checkSizes sebelum batch", () => {
+    expect(() => takePrefix(prep.X, prep.y, prep.n, prep.p, prep.n + 1)).toThrow(/N must be ≤ 7.*requested N = 8/);
+    expect(() => sampleFull(prep.full, 100, "prefix", 1)).toThrow(/without replacement/);
+    expect(() => checkSizes([5, 7, 10, 100], prep.n, "prefix")).toThrow(/too large: 10, 100/);
+    expect(() => checkSizes([5, 100], prep.n, "resample")).not.toThrow();
+  });
+});
+
+describe("urutan dari orderSeed", () => {
+  test("urutan N 'shuffled' deterministik untuk orderSeed yang sama, permutasi dari ukuran", () => {
+    const sizes = [100000, 1000, 50000, 10000];
+    const a = shuffledSizes(sizes, 1004);
+    expect(shuffledSizes([...sizes].reverse(), 1004)).toEqual(a);
+    expect([...a].sort((x, y) => x - y)).toEqual([1000, 10000, 50000, 100000]);
+    const orders = new Set(Array.from({ length: 20 }, (_, i) => shuffledSizes(sizes, 1000 + i).join(",")));
+    expect(orders.size).toBeGreaterThan(5);
+    expect(sizeOrderFor({ sizes, sizeOrder: "shuffled", orderSeed: 1004 })).toEqual(a);
+    expect(sizeOrderFor({ sizes, sizeOrder: "ascending", orderSeed: 1004 })).toEqual([1000, 10000, 50000, 100000]);
+  });
+
+  test("urutan workload per sesi deterministik dan memakai stream terpisah", () => {
+    expect(shuffledWorkloads(["full", "core"], 1007)).toEqual(shuffledWorkloads(["core", "full"], 1007));
+    const seen = new Set(Array.from({ length: 16 }, (_, i) => shuffledWorkloads(["core", "full"], 1000 + i).join(",")));
+    expect(seen).toEqual(new Set(["core,full", "full,core"]));
+  });
+
+  test("sel per lifecycle: persistent/per-run 4 sel (urutan v1), interleaved 6 sel", () => {
+    expect(cellsFor("persistent").map((c) => c.id)).toEqual(["A", "B-warm", "C", "D-warm"]);
+    expect(cellsFor("per-run").map((c) => c.id)).toEqual(["A", "B-cold", "C", "D-cold"]);
+    expect(cellsFor("interleaved").map((c) => c.id)).toEqual(["A", "B-warm", "B-cold", "C", "D-warm", "D-cold"]);
+  });
+
+  test.each([
+    ["core_warm_meta.json", "persistent"],
+    ["core_cold_meta.json", "per-run"],
+  ] as const)("urutan acak batch v1 (%s) terulang persis dengan orderSeed = seed v1", (file, lifecycle) => {
+    const meta = JSON.parse(fs.readFileSync(path.join(__dirname, "../../reproducibility/data", file), "utf8"));
+    const { settings } = meta;
+    for (const N of settings.sizes as number[]) {
+      const rng = cellOrderRng(settings.seed, N);
+      const measured: string[][] = [];
+      for (let rep = 1 - settings.warmup; rep <= settings.repetitions; rep++) {
+        const order = shuffleInPlace([...cellsFor(lifecycle)], rng).map((c) => CELLS[c.id].mode);
+        if (rep >= 1) measured.push(order);
+      }
+      const v1 = meta.orders.filter((o: { N: number }) => o.N === N).map((o: { order: string[] }) => o.order);
+      expect(measured).toEqual(v1);
+    }
+  });
+});
+
+describe("meta.json lama (v1) tetap terbaca", () => {
+  test("seed → dataSeed dan orderSeed; coldWorkers → lifecycle; resample + urutan naik", () => {
+    const v1 = JSON.parse(fs.readFileSync(path.join(__dirname, "../../reproducibility/data/core_cold_meta.json"), "utf8")).settings;
+    expect(normalizeBatchSettings(v1)).toEqual({
+      workload: "core",
+      sizes: [1470, 10000, 50000, 100000],
+      warmup: 5,
+      repetitions: 30,
+      dataSeed: 42,
+      orderSeed: 42,
+      sampling: "resample",
+      sizeOrder: "ascending",
+      lifecycle: "per-run",
+      maxIter: 20,
+      tol: 0.001,
+    });
+    expect(normalizeBatchSettings({ ...v1, coldWorkers: false }).lifecycle).toBe("persistent");
+  });
+
+  test("pengaturan v2 dibaca apa adanya; tanpa seed atau lifecycle → error", () => {
+    const v2 = {
+      workload: "full",
+      sizes: [1000],
+      warmup: 5,
+      repetitions: 30,
+      dataSeed: 1,
+      orderSeed: 1003,
+      sampling: "prefix",
+      sizeOrder: "shuffled",
+      lifecycle: "interleaved",
+      maxIter: 20,
+      tol: 0.001,
+    };
+    expect(normalizeBatchSettings(v2)).toEqual(v2);
+    expect(() => normalizeBatchSettings({ lifecycle: "persistent" })).toThrow(/seed/);
+    expect(() => normalizeBatchSettings({ seed: 1 })).toThrow(/lifecycle/);
   });
 });

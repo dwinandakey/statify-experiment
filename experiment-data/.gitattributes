@@ -1,0 +1,4 @@
+# Dataset benchmark disimpan byte demi byte, tanpa konversi akhir baris (core.autocrlf=true),
+# supaya SHA-256 di *.manifest.json sama dengan file hasil checkout di semua OS.
+*.csv -text
+*.manifest.json -text

@@ -38,3 +38,31 @@ export function shuffleInPlace<T>(items: T[], rng: Rng): T[] {
   }
   return items;
 }
+
+// --- Stream acak dari orderSeed ---
+// Urutan sel per repetisi memakai mulberry32(deriveSeed(orderSeed, N)) untuk setiap N (sama
+// dengan v1 bila orderSeed = seed v1). Urutan N dan urutan workload memakai salt negatif,
+// sehingga tidak pernah bertabrakan dengan stream per-N (N selalu positif).
+
+export const SIZE_ORDER_SALT = -1;
+export const WORKLOAD_ORDER_SALT = -2;
+
+/** Stream acak urutan sel untuk ukuran N. */
+export function cellOrderRng(orderSeed: number, N: number): Rng {
+  return mulberry32(deriveSeed(orderSeed, N));
+}
+
+/** Urutan N untuk sizeOrder "shuffled": ukuran diurutkan naik lalu diacak dengan orderSeed. */
+export function shuffledSizes(sizes: number[], orderSeed: number): number[] {
+  const base = [...new Set(sizes)].sort((a, b) => a - b);
+  return shuffleInPlace(base, mulberry32(deriveSeed(orderSeed, SIZE_ORDER_SALT)));
+}
+
+/**
+ * Urutan workload satu sesi (dipakai orkestrator): daftar diurutkan dulu ("core" < "full")
+ * lalu diacak dengan orderSeed. tests/experiment/orchestrate.mjs memakai salinan fungsi ini.
+ */
+export function shuffledWorkloads<T extends string>(workloads: T[], orderSeed: number): T[] {
+  const base = [...new Set(workloads)].sort();
+  return shuffleInPlace(base, mulberry32(deriveSeed(orderSeed, WORKLOAD_ORDER_SALT)));
+}

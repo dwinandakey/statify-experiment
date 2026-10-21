@@ -20,6 +20,11 @@
  *
  * Semua durasi diukur dengan performance.now() milik worker ini; yang dikirim
  * hanya durasi, bukan timestamp, karena timeOrigin worker berbeda dari main.
+ *
+ * Eksperimen v2: hasil "run"/"run_full" juga membawa tRecvEpochMs (baris pertama
+ * handler pesan) dan tPostEpochMs (tepat sebelum postMessage hasil) dalam epoch
+ * performance.timeOrigin + performance.now(), untuk merinci overheadMs di main thread.
+ * Titik ukur computeMs tidak berubah.
  */
 import { irlsCore } from "./irls_core.js";
 
@@ -29,7 +34,10 @@ function loadEnter() {
   return enterModulePromise;
 }
 
+const epochNow = () => performance.timeOrigin + performance.now();
+
 self.onmessage = async (event) => {
+  const tRecvEpochMs = epochNow();
   const msg = event.data;
   if (!msg || typeof msg !== "object") return;
 
@@ -51,7 +59,8 @@ self.onmessage = async (event) => {
       const t0 = performance.now();
       const result = calculateBinaryLogistic(X, rows, cols, y, configJson, featureNamesJson);
       const computeMs = performance.now() - t0;
-      self.postMessage({ type: "result", runId, result, computeMs });
+      const tPostEpochMs = epochNow();
+      self.postMessage({ type: "result", runId, result, computeMs, tRecvEpochMs, tPostEpochMs });
     } catch (err) {
       self.postMessage({ type: "error", runId, message: errorMessage(err) });
     }
@@ -73,7 +82,8 @@ self.onmessage = async (event) => {
       const t0 = performance.now();
       const result = irlsCore(X, y, n, p, maxIter, tol);
       const computeMs = performance.now() - t0;
-      self.postMessage({ type: "result", runId, result, computeMs });
+      const tPostEpochMs = epochNow();
+      self.postMessage({ type: "result", runId, result, computeMs, tRecvEpochMs, tPostEpochMs });
     } catch (err) {
       self.postMessage({ type: "error", runId, message: errorMessage(err) });
     }

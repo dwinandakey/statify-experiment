@@ -5,6 +5,7 @@ import { CheckCircle2, XCircle } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type {
   AccuracyRow,
+  CellId,
   CoreResult,
   InitTimings,
   ModeSummary,
@@ -13,7 +14,7 @@ import type {
   SummaryStats,
   WarmWorkerInit,
 } from "../types/experiment";
-import { MODES } from "../types/experiment";
+import { CELLS, MODES, cellLabel } from "../types/experiment";
 import { MODE_AGREEMENT_TOL, accuracyPassed } from "../services/analysis";
 import { fmtDiff, fmtInt, fmtMB, fmtMs, fmtNum } from "../services/format";
 
@@ -112,7 +113,19 @@ export function RunMetricsTable({
           <>
             <MetricRow label="spawnMs" value={fmtMs(record.spawnMs, 3)} hint="new Worker → ready, minus initMs" />
             <MetricRow label="initMs" value={fmtMs(record.initMs, 3)} hint="init inside the worker" />
+            <MetricRow
+              label="spawnMaxFrameGapMs"
+              value={fmtMs(record.spawnMaxFrameGapMs, 1)}
+              hint={`worker start-up, before timing · droppedFrames ${fmtInt(record.spawnDroppedFrames)} · longTasks ${record.spawnLongTaskCount === null ? "n/a" : record.spawnLongTaskCount}`}
+            />
           </>
+        )}
+        {isWorker && (
+          <MetricRow
+            label="dispatch / handler / return"
+            value={`${fmtMs(record.dispatchLatencyMs, 3)} / ${fmtMs(record.workerHandlerMs, 3)} / ${fmtMs(record.returnLatencyMs, 3)}`}
+            hint={record.clockCheckFailed ? "clock check FAILED (a value < −0.05 ms)" : "overhead breakdown from epoch stamps (ms)"}
+          />
         )}
         {record.workerStart === "warm" && warm && (
           <MetricRow
@@ -138,6 +151,11 @@ export function RunMetricsTable({
           hint={`≈ missed frames: Σ round(gap / T) − 1, T = ${fmtMs(record.frameIntervalMs, 1)} ms`}
         />
         <MetricRow label="longGapCount" value={fmtInt(record.longGapCount)} hint="number of gaps > 2T (not frames)" />
+        <MetricRow
+          label="t0 / t1 phase"
+          value={`${fmtMs(record.t0PhaseMs, 2)} / ${fmtMs(record.t1PhaseMs, 2)}`}
+          hint={`ms since the last frame; next frame ${fmtMs(record.nextFrameAfterT1Ms, 2)} ms after t1`}
+        />
         <MetricRow
           label="longTasks"
           value={record.longTaskCount === null ? "n/a" : `${record.longTaskCount} · ${fmtMs(record.longTaskTotalMs, 1)} ms`}
@@ -172,11 +190,12 @@ const statCell = (s: SummaryStats | null) =>
     "–"
   );
 
-/** Label mode ringkas untuk tabel: huruf + teknologi · lokasi. */
-function ModeCell({ mode }: { mode: keyof typeof MODES }) {
+/** Label sel ringkas untuk tabel: id sel + teknologi · lokasi (· siklus hidup worker). */
+function CellLabel({ cell }: { cell: CellId }) {
+  const c = CELLS[cell];
   return (
-    <span className="whitespace-nowrap" title={MODES[mode].label}>
-      <span className="font-semibold">{mode}</span> <span className="text-muted-foreground">{MODES[mode].short}</span>
+    <span className="whitespace-nowrap" title={cellLabel(cell)}>
+      <span className="font-semibold">{cell}</span> <span className="text-muted-foreground">{MODES[c.mode].short}</span>
     </span>
   );
 }
@@ -194,7 +213,7 @@ export function SummaryTable({ summaries }: { summaries: ModeSummary[] }) {
       <TableHeader>
         <TableRow>
           <TableHead className="text-right">N</TableHead>
-          <TableHead>Mode</TableHead>
+          <TableHead>Cell</TableHead>
           <TableHead className="text-right">compute</TableHead>
           <TableHead className="text-right">e2e</TableHead>
           {full && <TableHead className="text-right">format</TableHead>}
@@ -205,10 +224,10 @@ export function SummaryTable({ summaries }: { summaries: ModeSummary[] }) {
       </TableHeader>
       <TableBody>
         {summaries.map((s) => (
-          <TableRow key={`${s.N}-${s.mode}`}>
+          <TableRow key={`${s.N}-${s.cell}`}>
             <TableCell className={num}>{fmtInt(s.N)}</TableCell>
             <TableCell>
-              <ModeCell mode={s.mode} />
+              <CellLabel cell={s.cell} />
               <div className="text-xs text-muted-foreground">
                 {s.runs} runs
                 {s.errors > 0 && <span className="text-destructive"> · {s.errors} errors</span>}
@@ -218,7 +237,7 @@ export function SummaryTable({ summaries }: { summaries: ModeSummary[] }) {
             <TableCell className={num}>{statCell(s.e2eMs)}</TableCell>
             {full && <TableCell className={num}>{statCell(s.formatMs)}</TableCell>}
             {full && (
-              <TableCell className={num} data-testid={`bl-exp-total-${s.N}-${s.mode}`}>
+              <TableCell className={num} data-testid={`bl-exp-total-${s.N}-${s.cell}`}>
                 {statCell(s.totalMs)}
               </TableCell>
             )}
@@ -237,13 +256,13 @@ export function AccuracyTable({ accuracy }: { accuracy: AccuracyRow[] }) {
     <Table data-testid="bl-exp-accuracy-table">
       <caption className="mb-1 text-left text-xs text-muted-foreground" style={{ captionSide: "top" }}>
         {full
-          ? `Max difference vs the first run of mode D at the same N, over all runs. Pass if all SPSS tables are identical to that run and the scaled difference |Δ| / max(1, |value|) of B and S.E. is < ${MODE_AGREEMENT_TOL}.`
-          : `Max absolute difference vs the first run of mode D at the same N, over all runs; pass if both < ${MODE_AGREEMENT_TOL}.`}
+          ? `Max difference vs the first successful D-warm run (D-cold in per-run batches) at the same N, over all runs. Pass if all SPSS tables are identical to that run and the scaled difference |Δ| / max(1, |value|) of B and S.E. is < ${MODE_AGREEMENT_TOL}.`
+          : `Max absolute difference vs the first successful D-warm run (D-cold in per-run batches) at the same N, over all runs; pass if both < ${MODE_AGREEMENT_TOL}.`}
       </caption>
       <TableHeader>
         <TableRow>
           <TableHead className="text-right">N</TableHead>
-          <TableHead>Mode</TableHead>
+          <TableHead>Cell</TableHead>
           <TableHead className="text-right whitespace-nowrap">|ΔB|</TableHead>
           <TableHead className="text-right whitespace-nowrap">|ΔS.E.|</TableHead>
           <TableHead className="text-right">Iter.</TableHead>
@@ -254,12 +273,12 @@ export function AccuracyTable({ accuracy }: { accuracy: AccuracyRow[] }) {
       </TableHeader>
       <TableBody>
         {accuracy.map((a) => (
-          <TableRow key={`${a.N}-${a.mode}`}>
+          <TableRow key={`${a.N}-${a.cell}`}>
             <TableCell className={num}>{fmtInt(a.N)}</TableCell>
             <TableCell>
-              <ModeCell mode={a.mode} />
+              <CellLabel cell={a.cell} />
             </TableCell>
-            <TableCell className={num} data-testid={`bl-exp-acc-beta-${a.N}-${a.mode}`} data-value={String(a.maxAbsDiffBeta)}>
+            <TableCell className={num} data-testid={`bl-exp-acc-beta-${a.N}-${a.cell}`} data-value={String(a.maxAbsDiffBeta)}>
               {fmtDiff(a.maxAbsDiffBeta)}
             </TableCell>
             <TableCell className={num}>{fmtDiff(a.maxAbsDiffSe)}</TableCell>
@@ -268,7 +287,7 @@ export function AccuracyTable({ accuracy }: { accuracy: AccuracyRow[] }) {
             {full && (
               <TableCell
                 className={num}
-                data-testid={`bl-exp-acc-tables-${a.N}-${a.mode}`}
+                data-testid={`bl-exp-acc-tables-${a.N}-${a.cell}`}
                 data-identical={a.tablesIdentical ? String(a.tablesIdentical.identical) : ""}
                 data-total={a.tablesIdentical ? String(a.tablesIdentical.total) : ""}
               >

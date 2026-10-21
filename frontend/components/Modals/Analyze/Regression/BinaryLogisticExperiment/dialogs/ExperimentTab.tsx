@@ -19,15 +19,20 @@ import type {
   ComparisonResult,
   ExperimentMode,
   ExperimentResults,
+  Lifecycle,
+  PreparedData,
   ProductionComparison,
+  Sampling,
   SingleRunResult,
+  SizeOrder,
   Workload,
 } from "../types/experiment";
-import { DEFAULT_MAX_ITER, DEFAULT_TOL, MODES, MODE_ORDER, WORKLOAD_LABEL } from "../types/experiment";
-import { prepareExperimentData, resample } from "../services/prepareData";
+import { DEFAULT_MAX_ITER, DEFAULT_TOL, LIFECYCLE_LABEL, MODES, MODE_ORDER, WORKLOAD_LABEL, cellsFor } from "../types/experiment";
+import { checkSizes, prepareExperimentData, sampleDataset, takePrefix } from "../services/prepareData";
 import { type ExperimentSession, errorMessage, getMainThreadInit, totalBatchRuns, validateSettings } from "../services/runner";
 import { computeAccuracy, computeSummaries, worstAccuracyByN } from "../services/analysis";
 import { buildMetaJson, buildRunsCsv, downloadText } from "../services/exportCsv";
+import { encodeDesign, installAutomationHook, recordBatchOutput } from "../services/automation";
 import { compareWithProduction, runProductionEnter } from "../services/productionCompare";
 import { interRunPause } from "../services/metrics";
 import { fmtDiff, fmtDuration, fmtInt } from "../services/format";
@@ -68,6 +73,52 @@ const WORKLOAD_HINT: Record<Workload, string> = {
 
 const PRESET_SIZES = [10_000, 50_000, 100_000] as const;
 const IS_PRODUCTION_BUILD = process.env.NODE_ENV === "production";
+
+const SAMPLING_TEXT: Record<Sampling, { label: string; hint: string }> = {
+  prefix: { label: "First N rows", hint: "without replacement; N ≤ rows available (dataset pre-shuffled)" },
+  resample: { label: "Resample", hint: "with replacement, data seed (v1)" },
+};
+
+const SIZE_ORDER_TEXT: Record<SizeOrder, string> = {
+  ascending: "Ascending",
+  shuffled: "Shuffled (order seed)",
+};
+
+const LIFECYCLE_HINT: Record<Lifecycle, string> = {
+  persistent: "4 cells: worker created once before measuring",
+  "per-run": "4 cells: new worker for every run",
+  interleaved: "6 cells per repetition: A, B-warm, B-cold, C, D-warm, D-cold",
+};
+
+/** Radio kecil seragam untuk pilihan batch (data-testid = `${prefix}-${value}`). */
+function ChoiceGroup<T extends string>(props: {
+  label: string;
+  prefix: string;
+  value: T;
+  options: { value: T; label: string; hint?: string }[];
+  onChange: (v: T) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="space-y-1">
+      <div className="text-xs font-medium">{props.label}</div>
+      <RadioGroup
+        value={props.value}
+        onValueChange={(v) => props.onChange(v as T)}
+        className="flex flex-wrap gap-x-4 gap-y-1"
+        disabled={props.disabled}
+        aria-label={props.label}
+      >
+        {props.options.map((o) => (
+          <Label key={o.value} htmlFor={`${props.prefix}-${o.value}`} className="flex cursor-pointer items-center gap-2 text-sm font-normal" title={o.hint}>
+            <RadioGroupItem value={o.value} id={`${props.prefix}-${o.value}`} data-testid={`${props.prefix}-${o.value}`} />
+            {o.label}
+          </Label>
+        ))}
+      </RadioGroup>
+    </div>
+  );
+}
 
 function parseInteger(text: string, label: string, min: number): number {
   const v = Number(text.trim());
@@ -145,7 +196,12 @@ export function ExperimentTab({
   const [customSizes, setCustomSizes] = useDialogMemory("customSizes", "");
   const [warmup, setWarmup] = useDialogMemory("warmup", "5");
   const [repetitions, setRepetitions] = useDialogMemory("repetitions", "30");
-  const [seed, setSeed] = useDialogMemory("seed", "42");
+  // v1 memakai satu `seed` untuk resampling dan urutan; v2 memisahkannya
+  const [dataSeed, setDataSeed] = useDialogMemory("dataSeed", "42");
+  const [orderSeed, setOrderSeed] = useDialogMemory("orderSeed", "42");
+  const [sampling, setSampling] = useDialogMemory<Sampling>("sampling", "prefix");
+  const [sizeOrder, setSizeOrder] = useDialogMemory<SizeOrder>("sizeOrder", "ascending");
+  const [lifecycle, setLifecycle] = useDialogMemory<Lifecycle>("lifecycle", "persistent");
   const [workload, setWorkload] = useDialogMemory<Workload>("workload", "core");
   const [chartMetrics, setChartMetrics] = useDialogMemory<Record<Workload, ChartMetric>>("chartMetric", {
     core: "e2eMs",
@@ -176,6 +232,21 @@ export function ExperimentTab({
     return sessionProp;
   };
 
+  // Hook otomasi window.__blExp (hanya dengan ?expAutomation=1): design matrix workload core
+  // untuk N baris pertama, sama dengan sampling "prefix" batch
+  const preparedRef = useRef<PreparedData | null>(null);
+  preparedRef.current = prepared.ok ? prepared.value : null;
+  useEffect(
+    () =>
+      installAutomationHook(async (N) => {
+        const prep = preparedRef.current;
+        if (!prep) throw new Error("Select the dependent variable and covariates first.");
+        const d = takePrefix(prep.X, prep.y, prep.n, prep.p, N);
+        return encodeDesign(d.X, d.y, d.n, d.p, prep.featureNames);
+      }),
+    []
+  );
+
   const nOriginal = prepared.ok ? prepared.value.n : null;
 
   const batchSizesPreview = useMemo(() => {
@@ -185,11 +256,13 @@ export function ExperimentTab({
       if (sizeChecks.original) sizes.push(nOriginal);
       for (const n of PRESET_SIZES) if (sizeChecks[String(n)]) sizes.push(n);
       sizes.push(...parseSizeList(customSizes));
-      return { sizes: [...new Set(sizes)].sort((a, b) => a - b), error: null };
+      const unique = [...new Set(sizes)].sort((a, b) => a - b);
+      checkSizes(unique, nOriginal, sampling);
+      return { sizes: unique, error: null };
     } catch (err) {
       return { sizes: [], error: errorMessage(err) };
     }
-  }, [nOriginal, sizeChecks, customSizes]);
+  }, [nOriginal, sizeChecks, customSizes, sampling]);
 
   const totalRunsPreview = (() => {
     try {
@@ -197,6 +270,7 @@ export function ExperimentTab({
         sizes: batchSizesPreview.sizes,
         warmup: parseInteger(warmup, "Warm-up", 0),
         repetitions: parseInteger(repetitions, "Repetitions", 1),
+        lifecycle,
       });
     } catch {
       return null;
@@ -215,7 +289,7 @@ export function ExperimentTab({
           : singleSize === "custom"
             ? parseInteger(singleCustom, "Custom N", 1)
             : Number(singleSize);
-      data = resample(prep.X, prep.y, prep.n, prep.p, N, parseInteger(seed, "Seed", 0));
+      data = sampleDataset(prep, N, sampling, parseInteger(dataSeed, "Data seed", 0));
     } catch (err) {
       return toast.error(errorMessage(err));
     }
@@ -225,7 +299,7 @@ export function ExperimentTab({
       // Biarkan status "Running…" ter-render sebelum main thread mungkin terblokir
       await interRunPause();
       const record = await session().runSingle(mode, data, { coldWorkers, maxIter: DEFAULT_MAX_ITER, tol: DEFAULT_TOL });
-      setSingle({ record, featureNames: prep.featureNames, resampled: data.resampled, nOriginal: prep.n });
+      setSingle({ record, featureNames: prep.featureNames, resampled: data.resampled, sampling: data.sampling, nOriginal: prep.n });
       if (record.error) toast.error(`Run failed: ${record.error}`);
     } catch (err) {
       toast.error(errorMessage(err));
@@ -246,8 +320,11 @@ export function ExperimentTab({
         sizes: batchSizesPreview.sizes,
         warmup: parseInteger(warmup, "Warm-up", 0),
         repetitions: parseInteger(repetitions, "Repetitions", 1),
-        seed: parseInteger(seed, "Seed", 0),
-        coldWorkers,
+        dataSeed: parseInteger(dataSeed, "Data seed", 0),
+        orderSeed: parseInteger(orderSeed, "Order seed", 0),
+        sampling,
+        sizeOrder,
+        lifecycle,
         maxIter: DEFAULT_MAX_ITER,
         tol: DEFAULT_TOL,
       };
@@ -280,6 +357,14 @@ export function ExperimentTab({
       const accuracy = computeAccuracy(outcome.records);
       const result = { outcome, summaries, accuracy, featureNames: prep.featureNames };
       setBatches((prev) => ({ ...prev, [settings.workload]: result }));
+      // Orkestrator (?expAutomation=1): isi yang sama dengan Download CSV / meta.json
+      recordBatchOutput({
+        batchId: outcome.meta.batchId,
+        workload: settings.workload,
+        status: outcome.meta.status,
+        csv: buildRunsCsv(outcome.records, outcome.meta, prep.featureNames),
+        metaJson: buildMetaJson(outcome.meta, summaries, accuracy, prep.featureNames),
+      });
       if (outcome.meta.status === "error") toast.error(`Batch failed: ${outcome.errorMessage}`);
       else if (outcome.meta.status === "cancelled") toast.info(`Batch cancelled after ${outcome.records.length} recorded runs.`);
       else toast.success(`Batch finished: ${outcome.records.length} runs recorded.`);
@@ -312,7 +397,7 @@ export function ExperimentTab({
     setBusy("compare");
     try {
       const production = await runProductionEnter(prep);
-      const data = { X: prep.X, y: prep.y, n: prep.n, p: prep.p, resampled: false };
+      const data = { X: prep.X, y: prep.y, n: prep.n, p: prep.p, resampled: false, sampling: "original" as const };
       const comparisons: ProductionComparison[] = [];
       for (const m of MODE_ORDER) {
         const record = await session().runSingle(m, data, { coldWorkers: false, maxIter: DEFAULT_MAX_ITER, tol: DEFAULT_TOL });
@@ -417,6 +502,17 @@ export function ExperimentTab({
             </Label>
           ))}
         </RadioGroup>
+        <ChoiceGroup<"persistent" | "per-run">
+          label="Worker for Run once and OK (modes B and D)"
+          prefix="bl-exp-single-lifecycle"
+          value={coldWorkers ? "per-run" : "persistent"}
+          onChange={(v) => setColdWorkers(v === "per-run")}
+          options={[
+            { value: "persistent", label: "Persistent", hint: "reuse one worker across runs" },
+            { value: "per-run", label: "Per-run", hint: "new worker for every run (cold)" },
+          ]}
+          disabled={isBusy}
+        />
         <div className="flex flex-wrap items-end gap-3">
           <div className="space-y-1">
             <Label htmlFor="bl-exp-single-size" className="text-xs">
@@ -432,7 +528,7 @@ export function ExperimentTab({
               <option value="original">Original{nOriginal !== null ? ` (${fmtInt(nOriginal)})` : ""}</option>
               {PRESET_SIZES.map((n) => (
                 <option key={n} value={String(n)}>
-                  {fmtInt(n)} (resampled)
+                  {fmtInt(n)} ({sampling === "prefix" ? "first rows" : "resampled"})
                 </option>
               ))}
               <option value="custom">Custom…</option>
@@ -459,15 +555,15 @@ export function ExperimentTab({
           </Button>
         </div>
         <p className="text-xs text-muted-foreground">
-          Resampled sizes draw rows with replacement using the batch seed. Worker modes reuse a warm worker unless
-          “fresh worker per run” is checked below.
+          Run once uses the batch sampling below: the first N rows, or rows drawn with replacement using the data seed.
         </p>
 
         {single && (
           <div className="space-y-2 rounded-md border border-border p-3" data-testid="bl-exp-single-result" data-mode={single.record.mode}>
             <div className="text-xs text-muted-foreground">
               <strong className="text-foreground">{MODES[single.record.mode].label}</strong> · N = {fmtInt(single.record.N)}
-              {single.resampled ? " (resampled)" : " (original data)"} · p = {single.record.p}
+              {single.sampling === "resample" ? " (resampled)" : single.sampling === "prefix" ? " (first rows)" : " (original data)"} · p ={" "}
+              {single.record.p}
               {single.record.workerStart ? ` · ${single.record.workerStart} worker` : ""} · {single.record.timestamp}
             </div>
             {single.record.error && <div className="text-sm text-destructive">{single.record.error}</div>}
@@ -492,7 +588,7 @@ export function ExperimentTab({
       {/* ---------------- Batch ---------------- */}
       <section className="space-y-3">
         <h3 className={sectionTitle}>
-          <FlaskConical className="h-4 w-4 text-primary" aria-hidden /> Batch benchmark (all 4 modes)
+          <FlaskConical className="h-4 w-4 text-primary" aria-hidden /> Batch benchmark
         </h3>
         <div className="space-y-1.5">
           <div className="text-xs font-medium">Workload</div>
@@ -561,23 +657,45 @@ export function ExperimentTab({
           </div>
           {batchSizesPreview.error && <div className="text-xs text-destructive">{batchSizesPreview.error}</div>}
         </div>
+        <div className="flex flex-wrap gap-x-8 gap-y-3">
+          <ChoiceGroup<Sampling>
+            label="Sampling"
+            prefix="bl-exp-sampling"
+            value={sampling}
+            onChange={setSampling}
+            options={(["prefix", "resample"] as const).map((v) => ({ value: v, ...SAMPLING_TEXT[v] }))}
+            disabled={isBusy}
+          />
+          <ChoiceGroup<SizeOrder>
+            label="Size order"
+            prefix="bl-exp-size-order"
+            value={sizeOrder}
+            onChange={setSizeOrder}
+            options={(["ascending", "shuffled"] as const).map((v) => ({ value: v, label: SIZE_ORDER_TEXT[v] }))}
+            disabled={isBusy}
+          />
+          <ChoiceGroup<Lifecycle>
+            label="Worker lifecycle"
+            prefix="bl-exp-lifecycle"
+            value={lifecycle}
+            onChange={setLifecycle}
+            options={(["persistent", "per-run", "interleaved"] as const).map((v) => ({
+              value: v,
+              label: LIFECYCLE_LABEL[v],
+              hint: LIFECYCLE_HINT[v],
+            }))}
+            disabled={isBusy}
+          />
+        </div>
         <div className="flex flex-wrap items-end gap-3">
           <NumberField id="bl-exp-warmup" label="Warm-up runs" value={warmup} onChange={setWarmup} disabled={isBusy} />
           <NumberField id="bl-exp-repetitions" label="Repetitions" value={repetitions} onChange={setRepetitions} disabled={isBusy} />
-          <NumberField id="bl-exp-seed" label="Seed" value={seed} onChange={setSeed} disabled={isBusy} />
-          <label className="flex items-center gap-2 pb-1.5 text-sm">
-            <Checkbox
-              checked={coldWorkers}
-              onCheckedChange={(c) => setColdWorkers(c === true)}
-              disabled={isBusy}
-              data-testid="bl-exp-cold-workers"
-            />
-            Fresh worker per run (cold; also Run once and OK)
-          </label>
+          <NumberField id="bl-exp-data-seed" label="Data seed (resample)" value={dataSeed} onChange={setDataSeed} disabled={isBusy} />
+          <NumberField id="bl-exp-order-seed" label="Order seed" value={orderSeed} onChange={setOrderSeed} disabled={isBusy} />
         </div>
         <div className="text-xs text-muted-foreground">
           {totalRunsPreview !== null
-            ? `${batchSizesPreview.sizes.length} size(s) × (warm-up + repetitions) × 4 modes = ${fmtInt(totalRunsPreview)} runs; mode order is shuffled per repetition with the seed. Warm-up runs are not recorded.`
+            ? `${batchSizesPreview.sizes.length} size(s) × (warm-up + repetitions) × ${cellsFor(lifecycle).length} cells = ${fmtInt(totalRunsPreview)} runs; ${LIFECYCLE_HINT[lifecycle]}. Cell order is shuffled per repetition with the order seed; warm-up runs are not recorded.`
             : "Enter valid warm-up and repetition counts."}
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -639,7 +757,9 @@ export function ExperimentTab({
               <strong className="text-foreground">{batch.outcome.meta.batchId}</strong> ·{" "}
               {WORKLOAD_LABEL[batch.outcome.meta.settings.workload]} · status{" "}
               {batch.outcome.meta.status} · {fmtInt(batch.outcome.records.length)} recorded runs ·{" "}
-              {batch.outcome.meta.settings.coldWorkers ? "cold" : "warm"} workers · seed {batch.outcome.meta.settings.seed}
+              {LIFECYCLE_LABEL[batch.outcome.meta.settings.lifecycle].toLowerCase()} workers ·{" "}
+              {batch.outcome.meta.settings.sampling === "prefix" ? "first N rows" : `resampled (data seed ${batch.outcome.meta.settings.dataSeed})`} ·
+              order seed {batch.outcome.meta.settings.orderSeed} · N order {batch.outcome.meta.sizeOrderUsed.map(fmtInt).join(" → ")}
               {batch.outcome.errorMessage ? ` · ${batch.outcome.errorMessage}` : ""}
             </div>
             {hiddenRuns > 0 && (

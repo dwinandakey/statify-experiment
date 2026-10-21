@@ -131,6 +131,73 @@ export class FrameMonitor {
     if (this.handle !== null) cancelAnimationFrame(this.handle);
     this.handle = null;
   }
+
+  /** Salinan stempel rAF jendela terakhir (start() → stop()), untuk metrik fase frame. */
+  stampsSnapshot(): number[] {
+    return [...this.stamps];
+  }
+}
+
+export interface FramePhases {
+  /** t0 − callback rAF terakhir ≤ t0. */
+  t0PhaseMs: number | null;
+  /** t1 − callback rAF terakhir ≤ t1. */
+  t1PhaseMs: number | null;
+  /** callback rAF pertama > t1, dikurangi t1. */
+  nextFrameAfterT1Ms: number | null;
+}
+
+/**
+ * Fase dispatch dan hasil relatif terhadap frame, dari stempel yang sudah dicatat
+ * FrameMonitor (jam main thread yang sama dengan t0/t1). Metrik frame lain tidak berubah.
+ */
+export function computeFramePhases(stamps: number[], t0: number, t1: number): FramePhases {
+  let lastAtT0: number | null = null;
+  let lastAtT1: number | null = null;
+  let firstAfterT1: number | null = null;
+  for (const s of stamps) {
+    if (s <= t0) lastAtT0 = s;
+    if (s <= t1) lastAtT1 = s;
+    else if (firstAfterT1 === null) firstAfterT1 = s;
+  }
+  return {
+    t0PhaseMs: lastAtT0 === null ? null : t0 - lastAtT0,
+    t1PhaseMs: lastAtT1 === null ? null : t1 - lastAtT1,
+    nextFrameAfterT1Ms: firstAfterT1 === null ? null : firstAfterT1 - t1,
+  };
+}
+
+export interface WorkerLatencies {
+  dispatchLatencyMs: number;
+  returnLatencyMs: number;
+  workerHandlerMs: number;
+  clockCheckFailed: boolean;
+}
+
+/** Ambang cek jam: latensi < −0,05 ms berarti jam main thread dan worker tidak konsisten. */
+export const CLOCK_CHECK_TOLERANCE_MS = -0.05;
+
+/**
+ * Rincian overheadMs mode worker. Stempel worker (tRecv di baris pertama handler pesan run,
+ * tPost tepat sebelum postMessage hasil) dan t0/t1 main thread dinyatakan dalam epoch
+ * performance.timeOrigin + now() masing-masing konteks.
+ */
+export function workerLatencies(
+  t0: number,
+  t1: number,
+  epochs: { recvEpochMs: number; postEpochMs: number } | null | undefined,
+  timeOrigin: number
+): WorkerLatencies | null {
+  if (!epochs) return null;
+  const dispatchLatencyMs = epochs.recvEpochMs - (timeOrigin + t0);
+  const returnLatencyMs = timeOrigin + t1 - epochs.postEpochMs;
+  const workerHandlerMs = epochs.postEpochMs - epochs.recvEpochMs;
+  return {
+    dispatchLatencyMs,
+    returnLatencyMs,
+    workerHandlerMs,
+    clockCheckFailed: [dispatchLatencyMs, returnLatencyMs, workerHandlerMs].some((v) => v < CLOCK_CHECK_TOLERANCE_MS),
+  };
 }
 
 export function computeFrameStats(stamps: number[], frameIntervalMs = NOMINAL_FRAME_MS): FrameStats {
@@ -277,8 +344,100 @@ export function estimateTimerResolution(sampleMs = 5): number | null {
   return Number.isFinite(min) ? min : null;
 }
 
+// --- Browser, artefak, dan perangkat (eksperimen v2) ---
+
+export const ARTIFACT_HASHES_URL = "/workers/Regression/BinaryExperiment/ARTIFACT_HASHES.json";
+export const WASM_BINARY_URL = "/workers/Regression/BinaryExperiment/pkg/statify_logistic_bg.wasm";
+const WASM_MANIFEST_KEY = "pkg/statify_logistic_bg.wasm";
+
+type UaHighEntropy = NonNullable<EnvironmentMeta["uaHighEntropy"]>;
+
+/**
+ * Nama dan versi lengkap browser. Chromium: brand di fullVersionList (UA Chrome direduksi menjadi
+ * "Chrome/155.0.0.0"); Firefox dan lainnya: dari UA. Fungsi murni, diuji tanpa browser.
+ */
+export function detectBrowser(userAgent: string, uaHighEntropy: UaHighEntropy | null): { name: string; version: string | null } {
+  const brands = uaHighEntropy?.fullVersionList ?? [];
+  for (const [brand, name] of [
+    ["Microsoft Edge", "edge"],
+    ["Google Chrome", "chrome"],
+    ["Chromium", "chromium"],
+  ] as const) {
+    const hit = brands.find((b) => b.brand === brand);
+    if (hit) return { name, version: hit.version };
+  }
+  const firefox = /Firefox\/(\d+(?:\.\d+)*)/.exec(userAgent);
+  if (firefox) return { name: "firefox", version: firefox[1] };
+  const edge = /Edg\/(\d+(?:\.\d+)*)/.exec(userAgent);
+  if (edge) return { name: "edge", version: edge[1] };
+  const chrome = /Chrome\/(\d+(?:\.\d+)*)/.exec(userAgent);
+  if (chrome) return { name: "chrome", version: chrome[1] };
+  return { name: "unknown", version: null };
+}
+
+/** navigator.userAgentData.getHighEntropyValues (hanya Chromium); null di Firefox atau bila gagal. */
+async function uaHighEntropyValues(): Promise<UaHighEntropy | null> {
+  const uaData = (navigator as Navigator & { userAgentData?: { getHighEntropyValues?: (hints: string[]) => Promise<UaHighEntropy> } })
+    .userAgentData;
+  if (!uaData || typeof uaData.getHighEntropyValues !== "function") return null;
+  try {
+    const v = await uaData.getHighEntropyValues(["fullVersionList", "platformVersion", "architecture", "bitness"]);
+    return { fullVersionList: v.fullVersionList, platformVersion: v.platformVersion, architecture: v.architecture, bitness: v.bitness };
+  } catch {
+    return null;
+  }
+}
+
+/** navigator.getBattery (Chromium); null bila tidak ada atau ditolak. */
+async function batteryStatus(): Promise<EnvironmentMeta["battery"]> {
+  const getBattery = (navigator as Navigator & { getBattery?: () => Promise<{ charging: boolean; level: number }> }).getBattery;
+  if (typeof getBattery !== "function") return null;
+  try {
+    const b = await getBattery.call(navigator);
+    return { charging: b.charging, level: b.level };
+  } catch {
+    return null;
+  }
+}
+
+export function toHex(buffer: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buffer), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** SHA-256 (hex) lewat crypto.subtle; null bila tidak tersedia (konteks tidak aman). */
+export async function sha256Hex(data: ArrayBuffer | ArrayBufferView): Promise<string | null> {
+  if (typeof crypto === "undefined" || !crypto.subtle) return null;
+  return toHex(await crypto.subtle.digest("SHA-256", data as BufferSource));
+}
+
+/** ARTIFACT_HASHES.json build ini, lalu verifikasi .wasm yang disajikan dengan SHA-256 di runtime. */
+async function artifactCheck(): Promise<Pick<EnvironmentMeta, "artifactHashes" | "wasmSha256Runtime" | "wasmHashVerified">> {
+  let artifactHashes: EnvironmentMeta["artifactHashes"] = null;
+  let wasmSha256Runtime: string | null = null;
+  try {
+    const res = await fetch(ARTIFACT_HASHES_URL, { cache: "no-store" });
+    if (res.ok) artifactHashes = ((await res.json()) as { files?: EnvironmentMeta["artifactHashes"] }).files ?? null;
+  } catch {
+    artifactHashes = null;
+  }
+  try {
+    const res = await fetch(WASM_BINARY_URL);
+    if (res.ok) wasmSha256Runtime = await sha256Hex(await res.arrayBuffer());
+  } catch {
+    wasmSha256Runtime = null;
+  }
+  const expected = artifactHashes?.[WASM_MANIFEST_KEY]?.sha256;
+  return {
+    artifactHashes,
+    wasmSha256Runtime,
+    wasmHashVerified: expected && wasmSha256Runtime ? expected === wasmSha256Runtime : null,
+  };
+}
+
 export async function captureEnvironment(): Promise<EnvironmentMeta> {
   const nav = navigator as Navigator & { deviceMemory?: number };
+  const uaHighEntropy = await uaHighEntropyValues();
+  const browser = detectBrowser(nav.userAgent, uaHighEntropy);
   return {
     userAgent: nav.userAgent,
     hardwareConcurrency: typeof nav.hardwareConcurrency === "number" ? nav.hardwareConcurrency : null,
@@ -291,5 +450,33 @@ export async function captureEnvironment(): Promise<EnvironmentMeta> {
     longTaskSupported: new LongTaskCollector().supported,
     memoryApiSupported: mainHeapUsedMB() !== null,
     capturedAt: new Date().toISOString(),
+    browserName: browser.name,
+    browserVersion: browser.version,
+    uaHighEntropy,
+    webdriver: typeof nav.webdriver === "boolean" ? nav.webdriver : null,
+    hasFocusStart: typeof document !== "undefined" ? document.hasFocus() : null,
+    visibilityStart: typeof document !== "undefined" ? document.visibilityState : null,
+    hasFocusEnd: null,
+    visibilityEnd: null,
+    devicePixelRatio: typeof window !== "undefined" ? window.devicePixelRatio : null,
+    innerWidth: typeof window !== "undefined" ? window.innerWidth : null,
+    innerHeight: typeof window !== "undefined" ? window.innerHeight : null,
+    battery: await batteryStatus(),
+    // Diisi captureEnvironmentEnd setelah pengukuran (lihat di sana)
+    artifactHashes: null,
+    wasmSha256Runtime: null,
+    wasmHashVerified: null,
   };
+}
+
+/**
+ * Akhir batch: hasFocus/visibilityState akhir, lalu ARTIFACT_HASHES.json dan SHA-256 .wasm yang
+ * disajikan. Fetch .wasm sengaja SETELAH semua run: di halaman baru, fetch pertama sebelum
+ * preload akan membuat init() hanya merevalidasi cache HTTP sehingga mainWasmInitMs (fetch +
+ * compile + instantiate, sekali per page load) tidak lagi sama definisinya dengan v1.
+ */
+export async function captureEnvironmentEnd(env: EnvironmentMeta): Promise<void> {
+  env.hasFocusEnd = typeof document !== "undefined" ? document.hasFocus() : null;
+  env.visibilityEnd = typeof document !== "undefined" ? document.visibilityState : null;
+  Object.assign(env, await artifactCheck());
 }

@@ -1,0 +1,30 @@
+{
+  "description": "Dry run orkestrator v2 (Tugas 8): sama dengan bench.v2.json, tetapi 2 ukuran, warm-up 1, repetisi 2, tanpa pilot, 1 sesi per browser, cooldown singkat. Hasilnya bukan data artikel.",
+  "baseUrl": "http://localhost:3002",
+  "startServer": true,
+  "datasetPath": "experiment-data/brfss_bench_100k.csv",
+  "dependent": "Diabetes_binary",
+  "covariates": ["HighBP", "HighChol", "BMI", "PhysActivity", "Sex", "Age", "Income", "GenHlth"],
+  "sizes": [1000, 10000],
+  "warmup": 1,
+  "repetitions": 2,
+  "sampling": "prefix",
+  "sizeOrder": "shuffled",
+  "lifecycle": "interleaved",
+  "dataSeed": 42,
+  "workloads": ["core", "full"],
+  "browsers": [
+    { "name": "chrome", "executablePath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" },
+    { "name": "firefox", "executablePath": "C:\\Program Files\\Mozilla Firefox\\firefox.exe" }
+  ],
+  "protocol": "webDriverBiDi",
+  "headless": false,
+  "window": { "mode": "maximized" },
+  "foreground": true,
+  "pilotSessions": 0,
+  "sessions": 1,
+  "cooldownSec": 10,
+  "orderSeedBase": 1000,
+  "batchTimeoutMin": 45,
+  "outputDir": "benchmark-results"
+}

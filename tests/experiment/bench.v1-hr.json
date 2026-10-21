@@ -1,0 +1,19 @@
+{
+  "description": "Default runner legacy tests/experiment/benchmark-workloads.spec.ts (batch v1 artikel SAUCIS: IBM HR Attrition, resample, N naik). Variabel EXPERIMENT_BENCH_* tetap menimpa nilai di sini.",
+  "dependent": "Attrition",
+  "covariates": [
+    "Age",
+    "BusinessTravel",
+    "DistanceFromHome",
+    "MaritalStatus",
+    "MonthlyIncome",
+    "MonthlyRate",
+    "OverTime",
+    "TotalWorkingYears",
+    "YearsAtCompany"
+  ],
+  "workloads": ["core", "core:per-run", "full", "full:per-run"],
+  "warmup": 5,
+  "repetitions": 30,
+  "seed": 42
+}

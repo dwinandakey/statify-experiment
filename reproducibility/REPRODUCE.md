@@ -115,9 +115,12 @@ Evidence:
    machine (`statify_logistic_bg.wasm` SHA-256
    `3a1104c816ae140620a7d1cb2f13060a6072cfbe71de4d4026d29dcf8e61505d`).
 
-`npm run build:experiment` now always sets `NEXT_PUBLIC_GIT_COMMIT` from `git rev-parse --short
-HEAD`, ignores any value already in the environment, and appends `-dirty` when tracked files
-are modified.
+At tag `experiment-v1.0.0`, `npm run build:experiment` always sets `NEXT_PUBLIC_GIT_COMMIT` from
+`git rev-parse --short HEAD`, ignores any value already in the environment, and appends `-dirty`
+when tracked files are modified. From branch `experiment-v2` on, it uses
+`git describe --always --dirty --abbrev=8`, refuses to build from a modified working tree unless
+`EXPERIMENT_ALLOW_DIRTY=1`, and first writes the SHA-256 of the measured artifacts to
+`frontend/public/workers/Regression/BinaryExperiment/ARTIFACT_HASHES.json`.
 
 ## 4. Re-running the measurements
 

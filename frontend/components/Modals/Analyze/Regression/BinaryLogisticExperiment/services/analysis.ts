@@ -1,9 +1,10 @@
 /**
- * Ringkasan batch (median, IQR, min, max per N × mode) dan validasi akurasi
- * antar mode (mode D sebagai acuan). Fungsi murni, tanpa akses browser.
+ * Ringkasan batch (median, IQR, min, max per N × sel) dan validasi akurasi
+ * antar sel (run sukses pertama D-warm sebagai acuan; D-cold untuk batch
+ * per-run). Fungsi murni, tanpa akses browser.
  */
-import type { AccuracyRow, ModeSummary, RunRecord } from "../types/experiment";
-import { MODE_ORDER, REFERENCE_MODE } from "../types/experiment";
+import type { AccuracyRow, CellId, ModeSummary, RunRecord } from "../types/experiment";
+import { CELLS, CELL_ORDER, REFERENCE_CELLS } from "../types/experiment";
 import { summarize } from "./metrics";
 
 /** Ambang kesamaan antar mode (kriteria selesai). */
@@ -25,13 +26,14 @@ export function computeSummaries(records: RunRecord[]): ModeSummary[] {
   const measured = records.filter((r) => r.phase === "measure");
   const out: ModeSummary[] = [];
   for (const N of sizesOf(measured)) {
-    for (const mode of MODE_ORDER) {
-      const rows = measured.filter((r) => r.N === N && r.mode === mode);
+    for (const cell of CELL_ORDER) {
+      const rows = measured.filter((r) => r.N === N && r.cell === cell);
       if (rows.length === 0) continue;
       const good = rows.filter(ok);
       out.push({
         N,
-        mode,
+        mode: CELLS[cell].mode,
+        cell,
         runs: rows.length,
         errors: rows.length - good.length,
         computeMs: summarize(good.map((r) => r.computeMs)),
@@ -68,8 +70,20 @@ export function maxScaledDiff(a: number[], b: number[]): number {
 }
 
 /**
- * Untuk setiap N: selisih absolut maksimum beta dan SE tiap mode terhadap run
- * pertama mode D, diambil atas SEMUA run sukses mode tersebut (sekaligus
+ * Run acuan pada satu N: run sukses pertama sel D-warm; bila tidak ada (batch per-run),
+ * run sukses pertama D-cold. Dipakai juga kolom CSV tablesIdenticalToD.
+ */
+export function referenceRecord(recordsAtN: RunRecord[]): RunRecord | undefined {
+  for (const cell of REFERENCE_CELLS) {
+    const hit = recordsAtN.find((r) => r.cell === cell && ok(r));
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/**
+ * Untuk setiap N: selisih absolut maksimum beta dan SE tiap sel terhadap run
+ * acuan (referenceRecord), diambil atas SEMUA run sukses sel tersebut (sekaligus
  * menguji determinisme antar ulangan). Workload "full" juga menghitung berapa
  * run yang tabel SPSS-nya identik dengan run acuan tersebut.
  */
@@ -77,11 +91,11 @@ export function computeAccuracy(records: RunRecord[]): AccuracyRow[] {
   const out: AccuracyRow[] = [];
   for (const N of sizesOf(records)) {
     const atN = records.filter((r) => r.N === N && ok(r));
-    const refRecord = atN.find((r) => r.mode === REFERENCE_MODE);
+    const refRecord = referenceRecord(atN);
     const ref = refRecord?.result;
     if (!refRecord || !ref) continue;
-    for (const mode of MODE_ORDER) {
-      const rows = atN.filter((r) => r.mode === mode);
+    for (const cell of CELL_ORDER) {
+      const rows = atN.filter((r) => r.cell === cell);
       if (rows.length === 0) continue;
       let db = 0;
       let ds = 0;
@@ -93,7 +107,9 @@ export function computeAccuracy(records: RunRecord[]): AccuracyRow[] {
       }
       out.push({
         N,
-        mode,
+        mode: CELLS[cell].mode,
+        cell,
+        referenceCell: refRecord.cell as CellId,
         maxAbsDiffBeta: db,
         maxAbsDiffSe: ds,
         maxScaledDiff: scaled,

@@ -4,10 +4,13 @@
 //
 // Jalankan (Node >= 18):
 //   node compareWorkloads.mjs batch-....csv batch-full-....csv [lainnya.csv ...]
-// Keluaran Markdown ke stdout:
-//   1. median computeMs per (workload, N, mode) + median wasmCoreMs (C/D);
-//   2. rasio Wasm/JS per lokasi (C/A main thread, D/B worker) per N;
-//   3. biaya per baris: slope OLS computeMs ~ N per (workload, mode), dalam µs/baris,
+// Keluaran Markdown ke stdout, dikelompokkan per SEL (mode + siklus hidup worker:
+// A, B-warm, B-cold, C, D-warm, D-cold). CSV v1 tanpa kolom `cell` dipetakan dari
+// mode + workerStart, jadi batch persistent dan per-run v1 bisa digabung:
+//   1. median computeMs per (workload, N, sel) + median wasmCoreMs (sel C/D);
+//   2. rasio Wasm/JS per lokasi dan siklus hidup (C/A main thread, D-warm/B-warm,
+//      D-cold/B-cold) per N;
+//   3. biaya per baris: slope OLS computeMs ~ N per (workload, sel), dalam µs/baris,
 //      dan intercept (ms); untuk C/D juga slope wasmCoreMs (di dalam Wasm) dan
 //      sisa boundary (computeMs − wasmCoreMs − wasmSerializeMs).
 // Hanya run phase "measure" tanpa error dan tanpa pageHidden yang dipakai.
@@ -40,6 +43,12 @@ function parseCsv(text) {
   }
   const [header, ...body] = rows;
   return body.map((r) => Object.fromEntries(header.map((h, i) => [h, r[i]])));
+}
+
+/** Sel sebuah baris: kolom `cell` (v2) atau mode + workerStart (v1). */
+function cellOf(row) {
+  if (row.cell) return row.cell;
+  return row.workerStart === "warm" || row.workerStart === "cold" ? `${row.mode}-${row.workerStart}` : row.mode;
 }
 
 const num = (v) => (v === undefined || v === "" ? NaN : Number(v));
@@ -75,53 +84,59 @@ const runs = [];
 for (const file of files) {
   for (const r of parseCsv(readFileSync(file, "utf8"))) {
     if ((r.phase ?? "measure") !== "measure" || r.error || r.pageHidden === "true") continue;
-    runs.push({ ...r, file: basename(file), workload: r.workload || "core" });
+    runs.push({ ...r, file: basename(file), workload: r.workload || "core", cell: cellOf(r) });
   }
 }
+const CELL_ORDER = ["A", "B-warm", "B-cold", "C", "D-warm", "D-cold"];
 const workloads = [...new Set(runs.map((r) => r.workload))];
 const sizes = [...new Set(runs.map((r) => num(r.N)))].sort((a, b) => a - b);
-const modes = ["A", "B", "C", "D"];
-const sel = (w, N, m) => runs.filter((r) => r.workload === w && num(r.N) === N && r.mode === m);
-const med = (w, N, m, key) => median(sel(w, N, m).map((r) => num(r[key])));
+const cells = CELL_ORDER.filter((c) => runs.some((r) => r.cell === c));
+const sel = (w, N, c) => runs.filter((r) => r.workload === w && num(r.N) === N && r.cell === c);
+const med = (w, N, c, key) => median(sel(w, N, c).map((r) => num(r[key])));
 
 console.log(`# Workload comparison\n\nFiles: ${files.map((x) => basename(x)).join(", ")}  `);
 console.log(`Runs used: ${runs.length} (phase measure, no error, page visible)\n`);
 
-console.log("## Median computeMs (ms) per N × mode; [in Wasm] = median wasmCoreMs for C/D\n");
-console.log(`| workload | N | A JS·main | B JS·worker | C Wasm·main | D Wasm·worker | C in Wasm | D in Wasm |`);
-console.log(`|---|---:|---:|---:|---:|---:|---:|---:|`);
+console.log("## Median computeMs (ms) per N × cell; [in Wasm] = median wasmCoreMs for C/D cells\n");
+const wasmCells = cells.filter((c) => c.startsWith("C") || c.startsWith("D"));
+console.log(`| workload | N | ${cells.join(" | ")} | ${wasmCells.map((c) => `${c} in Wasm`).join(" | ")} |`);
+console.log(`|---|---:|${cells.map(() => "---:").join("|")}|${wasmCells.map(() => "---:").join("|")}|`);
 for (const w of workloads) {
   for (const N of sizes) {
-    const c = modes.map((m) => f(med(w, N, m, "computeMs")));
-    console.log(`| ${w} | ${N} | ${c.join(" | ")} | ${f(med(w, N, "C", "wasmCoreMs"))} | ${f(med(w, N, "D", "wasmCoreMs"))} |`);
+    const c = cells.map((cell) => f(med(w, N, cell, "computeMs")));
+    const inWasm = wasmCells.map((cell) => f(med(w, N, cell, "wasmCoreMs")));
+    console.log(`| ${w} | ${N} | ${c.join(" | ")} | ${inWasm.join(" | ")} |`);
   }
 }
 
 console.log("\n## Wasm / JS ratio of median computeMs (< 1: Wasm faster)\n");
-console.log(`| workload | N | main thread C/A | worker D/B | in-Wasm C / JS A |`);
-console.log(`|---|---:|---:|---:|---:|`);
+const pairs = [
+  ["main thread C/A", "C", "A"],
+  ["worker persistent D-warm/B-warm", "D-warm", "B-warm"],
+  ["worker per-run D-cold/B-cold", "D-cold", "B-cold"],
+].filter(([, wasm, js]) => cells.includes(wasm) && cells.includes(js));
+console.log(`| workload | N | ${pairs.map(([label]) => label).join(" | ")} | in-Wasm C / JS A |`);
+console.log(`|---|---:|${pairs.map(() => "---:").join("|")}|---:|`);
 for (const w of workloads) {
   for (const N of sizes) {
-    const a = med(w, N, "A", "computeMs");
-    console.log(
-      `| ${w} | ${N} | ${f(med(w, N, "C", "computeMs") / a, 3)} | ${f(med(w, N, "D", "computeMs") / med(w, N, "B", "computeMs"), 3)} | ${f(med(w, N, "C", "wasmCoreMs") / a, 3)} |`
-    );
+    const ratios = pairs.map(([, wasm, js]) => f(med(w, N, wasm, "computeMs") / med(w, N, js, "computeMs"), 3));
+    console.log(`| ${w} | ${N} | ${ratios.join(" | ")} | ${f(med(w, N, "C", "wasmCoreMs") / med(w, N, "A", "computeMs"), 3)} |`);
   }
 }
 
 console.log("\n## Per-row cost: OLS slope of computeMs on N (all runs)\n");
-console.log(`| workload | mode | slope (µs/row) | intercept (ms) | in-Wasm slope (µs/row) | boundary slope (µs/row) |`);
+console.log(`| workload | cell | slope (µs/row) | intercept (ms) | in-Wasm slope (µs/row) | boundary slope (µs/row) |`);
 console.log(`|---|---|---:|---:|---:|---:|`);
 for (const w of workloads) {
-  for (const m of modes) {
-    const rs = runs.filter((r) => r.workload === w && r.mode === m);
+  for (const c of cells) {
+    const rs = runs.filter((r) => r.workload === w && r.cell === c);
     const all = ols(rs.map((r) => [num(r.N), num(r.computeMs)]));
     const inWasm = ols(rs.map((r) => [num(r.N), num(r.wasmCoreMs)]));
     const boundary = ols(
       rs.map((r) => [num(r.N), num(r.computeMs) - num(r.wasmCoreMs) - (Number.isFinite(num(r.wasmSerializeMs)) ? num(r.wasmSerializeMs) : 0)])
     );
     console.log(
-      `| ${w} | ${m} | ${f(all.slope * 1000, 3)} | ${f(all.intercept, 2)} | ${f(inWasm.slope * 1000, 3)} | ${f(boundary.slope * 1000, 3)} |`
+      `| ${w} | ${c} | ${f(all.slope * 1000, 3)} | ${f(all.intercept, 2)} | ${f(inWasm.slope * 1000, 3)} | ${f(boundary.slope * 1000, 3)} |`
     );
   }
 }

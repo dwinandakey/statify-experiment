@@ -82,7 +82,8 @@ self.onmessage = (e) => {
         columnIndex: colIndex,
         name: variableName,
         type: isNumeric ? 'NUMERIC' : 'STRING',
-        width: isNumeric ? 8 : Math.min(32767, Math.max(8, ...colData.map(v=>String(v ?? '').length), variableName.length)),
+        // reduce, bukan Math.max(...colData): spread ratusan ribu argumen melampaui stack Web Worker
+        width: isNumeric ? 8 : Math.min(32767, Math.max(8, colData.reduce((max, v) => Math.max(max, String(v ?? '').length), 0), variableName.length)),
         decimals: isNumeric ? Math.min(potentialDecimals,16) : 0,
         label: '',
         columns: 72,

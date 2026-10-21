@@ -22,7 +22,7 @@ import {
   type BinaryLogisticCategoricalParams,
 } from "@/components/Modals/Analyze/Regression/BinaryLogistic/types/binary-logistic";
 import type { BatchResult, ExperimentResults, FullRunRecord, PreparedData, Workload } from "../types/experiment";
-import { MODES } from "../types/experiment";
+import { LIFECYCLE_LABEL, MODES, cellLabel } from "../types/experiment";
 import { isCategoricalCovariate } from "./prepareData";
 import { METHOD } from "./spssFormat";
 import { fmtDiff, fmtInt, fmtMB, fmtMs, fmtNum } from "./format";
@@ -100,13 +100,13 @@ function batchSections(workload: Workload, result: BatchResult): ExperimentSecti
   const full = workload === "full";
   const cell = (st: (typeof summaries)[number]["e2eMs"]) => (st ? `${fmtMs(st.median)} [${fmtMs(st.q1)}–${fmtMs(st.q3)}]` : "–");
 
-  const summaryColumns: [string, string][] = [["N", "n"], ["Mode", "mode"], ["Runs", "runs"], ["computeMs", "compute"], ["e2eMs", "e2e"]];
+  const summaryColumns: [string, string][] = [["N", "n"], ["Cell", "mode"], ["Runs", "runs"], ["computeMs", "compute"], ["e2eMs", "e2e"]];
   if (full) summaryColumns.push(["formatMs", "format"], ["totalMs", "total"]);
   summaryColumns.push(["maxFrameGapMs", "gap"], ["wasmCoreMs (in Wasm)", "inwasm"]);
 
   const accuracyColumns: [string, string][] = [
     ["N", "n"],
-    ["Mode", "mode"],
+    ["Cell", "mode"],
     ["max |ΔB|", "db"],
     ["max |ΔS.E.|", "dse"],
     ["Iterations", "it"],
@@ -119,8 +119,9 @@ function batchSections(workload: Workload, result: BatchResult): ExperimentSecti
       title: `Batch benchmark (${text.name}) – summary`,
       description:
         `Batch ${meta.batchId} (${meta.status}): ${outcome.records.length} recorded runs of ${meta.dataset.dependent} ~ ` +
-        `${meta.dataset.covariates.join(", ")}; warm-up ${s.warmup}, repetitions ${s.repetitions}, seed ${s.seed}, ` +
-        `${s.coldWorkers ? "cold" : "warm"} workers, build ${meta.environment.buildMode}. ` +
+        `${meta.dataset.covariates.join(", ")}; warm-up ${s.warmup}, repetitions ${s.repetitions}, ` +
+        `${s.sampling === "prefix" ? "first-N-rows sampling" : `resampling with data seed ${s.dataSeed}`}, order seed ${s.orderSeed}, ` +
+        `sizes in ${s.sizeOrder} order, ${LIFECYCLE_LABEL[s.lifecycle].toLowerCase()} workers, build ${meta.environment.buildMode}. ` +
         (full
           ? "Each run computed the full analysis and built the SPSS tables (not written); totalMs = dispatch → tables formatted. "
           : "") +
@@ -132,7 +133,7 @@ function batchSections(workload: Workload, result: BatchResult): ExperimentSecti
         summaryColumns,
         summaries.map((sm) => ({
           n: fmtInt(sm.N),
-          mode: MODES[sm.mode].label,
+          mode: cellLabel(sm.cell),
           runs: `${sm.runs}${sm.errors ? ` (${sm.errors} errors)` : ""}`,
           compute: cell(sm.computeMs),
           e2e: cell(sm.e2eMs),
@@ -146,15 +147,15 @@ function batchSections(workload: Workload, result: BatchResult): ExperimentSecti
     {
       title: `Batch benchmark (${text.name}) – accuracy vs mode D`,
       description: full
-        ? "Maximum absolute difference of B and S.E. (Variables in the Equation) against the first run of mode D at the same N, and the number of runs whose formatted SPSS tables are identical to that run."
-        : "Maximum absolute difference of B and S.E. against the first run of mode D at the same N, over all runs.",
+        ? "Maximum absolute difference of B and S.E. (Variables in the Equation) against the first successful run of cell D-warm (D-cold in per-run batches) at the same N, and the number of runs whose formatted SPSS tables are identical to that run."
+        : "Maximum absolute difference of B and S.E. against the first successful run of cell D-warm (D-cold in per-run batches) at the same N, over all runs.",
       component: text.component,
       spec: table(
         `Accuracy vs mode D – ${text.name}`,
         accuracyColumns,
         accuracy.map((a) => ({
           n: fmtInt(a.N),
-          mode: MODES[a.mode].label,
+          mode: cellLabel(a.cell),
           db: fmtDiff(a.maxAbsDiffBeta),
           dse: fmtDiff(a.maxAbsDiffSe),
           it: fmtInt(a.iterations),

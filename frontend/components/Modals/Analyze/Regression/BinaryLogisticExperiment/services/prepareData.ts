@@ -15,7 +15,7 @@ import type { DataRow } from "@/types/Data";
 import type { Variable } from "@/types/Variable";
 import { useDataStore } from "@/stores/useDataStore";
 import { useVariableStore } from "@/stores/useVariableStore";
-import type { CategoricalCoding, DatasetForRun, FullAnalysisInput, PreparedData } from "../types/experiment";
+import type { CategoricalCoding, DatasetForRun, FullAnalysisInput, PreparedData, Sampling } from "../types/experiment";
 import { mulberry32 } from "./prng";
 
 /**
@@ -334,7 +334,7 @@ export function resample(
   if (!Number.isInteger(targetN) || targetN < 1) {
     throw new Error(`Invalid target size N = ${targetN}.`);
   }
-  if (targetN === n) return { X, y, n, p, resampled: false };
+  if (targetN === n) return { X, y, n, p, resampled: false, sampling: "original" };
 
   const rng = mulberry32(seed);
   const Xr = new Float64Array(targetN * p);
@@ -344,7 +344,50 @@ export function resample(
     Xr.set(X.subarray(src * p, src * p + p), i * p);
     yr[i] = y[src];
   }
-  return { X: Xr, y: yr, n: targetN, p, resampled: true };
+  return { X: Xr, y: yr, n: targetN, p, resampled: true, sampling: "resample" };
+}
+
+/**
+ * N baris pertama tanpa pengembalian (sampling "prefix"). Dataset benchmark v2 sudah diacak
+ * oleh skrip persiapan, jadi prefix adalah sampel acak sederhana. Hasilnya view (subarray) ke
+ * data asli; runner tetap menyalin buffer (slice) sebelum timer. N = n → data asli apa adanya.
+ */
+export function takePrefix(X: Float64Array, y: Float64Array, n: number, p: number, targetN: number): DatasetForRun {
+  if (!Number.isInteger(targetN) || targetN < 1) {
+    throw new Error(`Invalid target size N = ${targetN}.`);
+  }
+  if (targetN > n) {
+    throw new Error(
+      `Prefix sampling takes the first N rows without replacement, so N must be ≤ ${n.toLocaleString("en-US")} ` +
+        `(rows after listwise deletion); requested N = ${targetN.toLocaleString("en-US")}.`
+    );
+  }
+  if (targetN === n) return { X, y, n, p, resampled: false, sampling: "original" };
+  return { X: X.subarray(0, targetN * p), y: y.subarray(0, targetN), n: targetN, p, resampled: false, sampling: "prefix" };
+}
+
+/** Dataset workload "core" (design matrix) ukuran N sesuai sampling. */
+export function sampleDataset(prepared: PreparedData, N: number, sampling: Sampling, dataSeed: number): DatasetForRun {
+  return sampling === "prefix"
+    ? takePrefix(prepared.X, prepared.y, prepared.n, prepared.p, N)
+    : resample(prepared.X, prepared.y, prepared.n, prepared.p, N, dataSeed);
+}
+
+/** Input workload "full" ukuran N sesuai sampling; baris identik dengan sampleDataset. */
+export function sampleFull(input: FullAnalysisInput, N: number, sampling: Sampling, dataSeed: number): FullAnalysisInput {
+  return sampling === "prefix" ? prefixFull(input, N) : resampleFull(input, N, dataSeed);
+}
+
+/** Error yang jelas bila ada ukuran N yang tidak bisa dibentuk dengan sampling ini. */
+export function checkSizes(sizes: number[], n: number, sampling: Sampling): void {
+  if (sampling !== "prefix") return;
+  const tooLarge = sizes.filter((N) => N > n);
+  if (tooLarge.length > 0) {
+    throw new Error(
+      `Prefix sampling needs every N ≤ ${n.toLocaleString("en-US")} (rows after listwise deletion); ` +
+        `too large: ${tooLarge.map((N) => N.toLocaleString("en-US")).join(", ")}. Use resampling or smaller sizes.`
+    );
+  }
 }
 
 /**
@@ -356,6 +399,23 @@ export function resample(
 export function resampleFull(input: FullAnalysisInput, targetN: number, seed: number): FullAnalysisInput {
   const d = resample(input.X, input.y, input.rows, input.cols, targetN, seed);
   if (!d.resampled) return input;
+  return {
+    ...input,
+    X: d.X,
+    y: d.y,
+    rows: d.n,
+    modelInfo: { ...input.modelInfo, n_samples: d.n, n_missing: 0 },
+  };
+}
+
+/**
+ * N baris pertama input analisis lengkap (kovariat mentah), sama dengan takePrefix pada design
+ * matrix, sehingga workload "core" dan "full" memproses baris yang sama persis. Seperti
+ * resampleFull, subset tidak punya missing (n_missing = 0); N = n → input apa adanya.
+ */
+export function prefixFull(input: FullAnalysisInput, targetN: number): FullAnalysisInput {
+  const d = takePrefix(input.X, input.y, input.rows, input.cols, targetN);
+  if (d.sampling === "original") return input;
   return {
     ...input,
     X: d.X,
