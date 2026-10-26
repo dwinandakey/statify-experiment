@@ -1,6 +1,6 @@
 # Statify
 
-**Statify** adalah Aplikasi analisis statistik berbasis web yang berfungsi untuk mendukung proses pembelajaran mata kuliah di bidang statistik di lingkungan **Politeknik Statistika STIS**. **Statify** memudahkan pengguna untuk mengunggah data dan melakukan analisis statistik. Dibangun dengan Next.js untuk frontend dan Express.js untuk backend, dengan penyimpanan data menggunakan IndexedDB di browser.
+**Statify** adalah aplikasi analisis statistik berbasis web yang berfungsi untuk mendukung proses pembelajaran mata kuliah di bidang statistik di lingkungan **Politeknik Statistika STIS**. **Statify** memudahkan pengguna untuk mengunggah data dan melakukan analisis statistik. Dibangun dengan Next.js untuk frontend dan Express.js untuk backend, dengan penyimpanan data menggunakan IndexedDB di browser.
 
 ## Riwayat Pengembangan
 
@@ -39,12 +39,22 @@ Modul berikut ada di `frontend/components/Modals/Analyze/`. Sebagian item di men
 ### Visualisasi
 
 - **Chart Builder** dan **Legacy Dialogs** di menu Graphs, dengan Chart.js, ECharts, D3, dan Recharts.
+- **Real-time Updates**: Visualisasi yang berubah sesuai filter data
+- **Export Visualisasi**: Simpan chart sebagai PNG, PDF, atau SVG
 
 ### Antarmuka
 
 -- Tampilan hasil bergaya SPSS (tabel output, catatan kaki, interpretasi singkat) dan log analisis.
 - Halaman **Help** berisi panduan statistik dan penggunaan modul.
-- Tur fitur interaktif pada dialog analisis (misalnya Regresi Logistik Biner).
+- Tur fitur interaktif pada dialog analisis.
+
+### User Experience
+
+- **Progressive Web App**: Dapat di-install sebagai aplikasi desktop
+- **Auto-save**: Penyimpanan otomatis ke IndexedDB browser
+- **Responsive Design**: Mendukung desktop, tablet, dan mobile
+- **Offline Support**: Bekerja tanpa koneksi internet setelah di-load
+
 ## Arsitektur
 
 ```
@@ -105,51 +115,250 @@ Dokumentasi per bagian: [frontend/README.md](frontend/README.md), [backend/Readm
 || Pengujian | Jest, Testing Library, `cargo test` |
  Deployment | Docker, Docker Compose, Dokploy (Traefik) |
 
-## Prasyarat
+## Prasyarat Sistem
 
-- **Node.js** 18.18 atau lebih baru (disyaratkan Next.js 15) dan **npm** 8+ (workspaces).
-- **Git**.
-- **Docker** (opsional) untuk menjalankan lewat container.
-- **Rust** dan **wasm-pack** hanya diperlukan jika mengubah kode Rust. Hasil build WASM sudah ikut tersimpan di `frontend/public/workers/`.
+### Development Environment
 
-## Menjalankan Secara Lokal
+- **Node.js**: v18.0.0 atau lebih baru
+- **npm**: v8.0.0 atau lebih baru
+- **Git**: Untuk version control
+- **Docker** (opsional): Untuk containerized development
+
+### Production Environment
+
+- **OS**: Linux (Ubuntu 20.04+ direkomendasikan)
+- **Memory**: Minimum 2GB RAM
+- **Storage**: 10GB free space
+- **Network**: Port 80, 443, 3000, 5000 terbuka
+
+## Instalasi dan Setup
+
+### Metode 1: Development Setup
+
+1. **Clone Repository**
+
+   ```bash
+   git clone https://github.com/yourusername/statify.git
+   cd statify
+   ```
+
+2. **Install Dependencies**
+
+   ```bash
+   # Install semua dependencies untuk workspaces
+   npm run install:all
+
+   # Alternatif: install manual
+   npm install
+   cd frontend && npm install
+   cd ../backend && npm install
+   ```
+
+3. **Setup Environment Variables**
+
+   ```bash
+   # Copy environment template
+   cp .env.example .env
+   cp frontend/.env.example frontend/.env.local
+   cp backend/.env.example backend/.env
+
+   # Edit file .env sesuai kebutuhan
+   nano .env
+   ```
+
+4. **Setup Environment Variables**
+
+   ```bash
+   # Edit file .env sesuai kebutuhan
+   # Pastikan NEXT_PUBLIC_BACKEND_URL sesuai dengan port backend
+   ```
+
+5. **Jalankan Aplikasi**
+
+   ```bash
+   # Mode development (auto-restart)
+   npm run dev
+
+   # Frontend: http://localhost:3000
+   # Backend: http://localhost:5000
+   # API Docs: http://localhost:5000/api-docs
+   ```
+
+### Metode 2: Docker Setup
+
+1. **Build dan Jalankan Container**
+
+   ```bash
+   # Build semua services
+   docker-compose up -d
+
+   # Verifikasi status
+   docker-compose ps
+   ```
+
+2. **Akses Aplikasi**
+   - **Frontend**: http://localhost:3001
+   - **Backend**: http://localhost:5000
+
+3. **Monitoring Container**
+
+   ```bash
+   # Logs real-time
+   docker-compose logs -f
+
+   # Restart services
+   docker-compose restart
+
+   # Stop services
+   docker-compose down
+   ```
+
+### Metode 3: Production Deployment
+
+1. **Build Production**
+
+   ```bash
+   # Build frontend
+   cd frontend
+   npm run build
+
+   # Build backend
+   cd ../backend
+   npm run build
+   ```
+
+2. **Deploy dengan Docker**
+
+   ```bash
+   # Production build
+   docker-compose -f docker-compose.prod.yml up -d
+
+   # Dengan reverse proxy (nginx)
+   docker-compose -f docker-compose.nginx.yml up -d
+   ```
+
+## Cara Penggunaan
+
+### 1. Upload Data
+
+1. Buka http://localhost:3000
+2. Klik tombol "Upload Data" di dashboard
+3. Pilih file (format: .sav, .csv, .xlsx, .json)
+4. Review data preview
+5. Klik "Proceed to Analysis"
+
+### 2. Analisis Statistik
+
+1. Pilih jenis analisis dari menu sidebar
+2. Pilih variabel yang ingin dianalisis
+3. Konfigurasi parameter analisis
+4. Klik "Run Analysis"
+5. Tunggu hasil (progress bar akan muncul)
+
+### 3. Visualisasi Data
+
+1. Setelah analisis selesai, klik tab "Visualization"
+2. Pilih tipe chart yang diinginkan
+3. Drag-and-drop variabel ke sumbu X dan Y
+4. Customize warna, label, dan style
+5. Export chart sebagai gambar
+
+### 4. Export Hasil
+
+1. Klik tombol "Export" di hasil analisis
+2. Pilih format (PDF, Excel, PNG)
+3. Pilih komponen yang ingin diexport
+4. Download file hasil
+
+## Testing
+
+### Unit Testing
 
 ```bash
-# 1. Clone dan install (workspaces frontend + backend, lalu patch-package otomatis berjalan)
-git clone https://git.stis.ac.id/222212887/statify64.git
-cd statify64
-npm install
+# Frontend tests
+cd frontend
+npm run test
 
-# 2. Environment
-cp .env.example .env
-cp frontend/.env.example frontend/.env.local   # NEXT_PUBLIC_BACKEND_URL=http://localhost:5000
-
-# 3. Jalankan frontend dan backend sekaligus
-npm run dev
+# Backend tests
+cd backend
+npm run test
 ```
 
-- Frontend: http://localhost:3000
-- Backend: http://localhost:5000 (dokumentasi API di http://localhost:5000/api-docs)
-
-Backend tidak memerlukan file `.env`. Port 5000 diatur di `backend/server/config/constants.ts`, dan `NEXT_PUBLIC_FRONTEND_URL` hanya perlu diisi bila domain frontend belum ada di daftar origin yang diizinkan.
-
-### Docker
+### E2E Testing
 
 ```bash
-cp .env.example .env     # pastikan NEXT_PUBLIC_BACKEND_URL sesuai
-docker-compose up -d --build
+# Install Playwright browsers
+npx playwright install
+
+# Jalankan E2E tests
+npm run test:e2e
 ```
 
-- Frontend: http://localhost:3001
-- Backend: http://localhost:5000
-
-Untuk deployment di server, gunakan `docker-compose.dokploy.yml` (routing Traefik ke domain `statify-dev.student.stis.ac.id`).
-
-### Build produksi
+### Testing Khusus
 
 ```bash
-npm run build            # build frontend dan backend (workspaces)
+# Frontend descriptive statistics tests
+npm run test:descriptive --workspace=frontend
+
+# Backend specific tests
+npm test --workspace=backend
 ```
+
+## Development Guide
+
+### Code Style
+
+- Gunakan ESLint untuk code linting
+- Follow TypeScript strict mode
+- Jest untuk testing
+- Gunakan Prettier untuk code formatting
+
+### Branch Strategy
+
+- `main`: Production-ready code
+- Gunakan branch baru untuk setiap fitur/bugfix
+
+### Pull Request Guidelines
+
+1. Pastikan semua tests pass
+2. Update dokumentasi jika perlu
+3. Request review sebelum merge
+
+## Monitoring dan Logging
+
+### Aplikasi Monitoring
+
+- **Frontend**: Browser DevTools dan console logging
+- **Backend**: Console logging dengan built-in logging
+- **Storage**: Browser IndexedDB monitoring via DevTools Application tab
+- **Performance**: Browser DevTools Performance tab untuk profiling
+
+### Health Checks
+
+```bash
+# Check backend status
+curl http://localhost:5000
+
+# Check frontend build
+npm run build
+```
+
+## Security
+
+### Best Practices
+
+- Rate limiting untuk API endpoints (express-rate-limit)
+- Input validation dan sanitization (Zod schema validation)
+- CORS configuration yang ketat
+- Environment variables untuk konfigurasi
+- Security headers dengan Helmet
+
+### Security Headers
+
+- Content-Security-Policy
+- X-Frame-Options
+- X-Content-Type-Options
+- Referrer-Policy
 
 ## Mengubah Modul Berbasis Rust/WASM
 
@@ -159,15 +368,8 @@ Setiap modul yang menghitung dengan Rust memiliki crate sendiri (`rust/` atau `w
 2. Build paket WASM: `wasm-pack build --target web`.
 3. Salin berkas hasil build (`*.wasm`, `*.js`, `*.d.ts`, `package.json`) ke folder worker modul di `frontend/public/workers/...`.
 
-Worker hanya membaca salinan di `public/workers`, sehingga langkah 3 tidak boleh terlewat. Contoh langkah lengkap ada di [README_Statify_64.md](README_Statify_64.md) pada bagian Regresi Logistik Biner.
+Worker hanya membaca salinan di `public/workers`, sehingga langkah 3 tidak boleh terlewat. Contoh langkah lengkap ada di [README_Statify_64.md](README_Statify_64.md).
 
-## Pengujian
-
-```bash
-npm test                 # Jest untuk semua workspace
-ncd frontend && npm test  # Jest frontend saja
-cargo test               # di folder crate Rust modul terkait
-```
 ## Alur Kontribusi
 
 - Setiap kontributor bekerja di branch sendiri (per modul atau per fitur), lalu digabung ke `main` lewat merge request.
@@ -198,22 +400,10 @@ arts, dan D3.js** - Library visualisasi data
 
 _Dibuat dengan komunitas open source_
 rts, dan D3.js** - Library visualisasi data
+- **Next.js Team** - Untuk framework React yang modern
+- **Express.js Community** - Backend framework yang ringan dan powerful
+- **Chart.js, ECharts, dan D3.js** - Library visualisasi data
 - **TypeScript Team** - Type safety yang menjaga kode tetap maintainable
 - **Zustand Team** - State management yang sederhana dan efektif
 - **Semua kontributor open source** - Terima kasih atas library dan tools yang digunakan
-
 ---
-
-**Statify** - Membuat analisis statistik menjadi mudah dan menyenangkan!
-
-_Dibuat dengan komunitas open source_
-arts, dan D3.js** - Library visualisasi data
-- **TypeScript Team** - Type safety yang menjaga kode tetap maintainable
-- **Zustand Team** - State management yang sederhana dan efektif
-- **Semua kontributor open source** - Terima kasih atas library dan tools yang digunakan
-
----
-
-**Statify** - Membuat analisis statistik menjadi mudah dan menyenangkan!
-
-_Dibuat dengan komunitas open source_

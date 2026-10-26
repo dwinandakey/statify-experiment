@@ -19,6 +19,3 @@ Pengembangan memakai metode Feature-Driven Development (FDD) dan dievaluasi deng
 | 5 | Analisis Regresi Linier dan Estimasi Kurva | Naufal Ihsan Putra Marlin (222112246) | Erna Nurmawati, S.S.T., M.T. | Linear Regression (statistik, plot, save, opsi, dan uji asumsi klasik) serta Curve Estimation |
 | 6 | Pemodelan Linier dan Klasifikasi Data | Umar Hadi Pranoto (222112404) | Ibnu Santoso, S.S.T., M.T. | GLM Univariate dan K-Means Cluster |
 
-## Dokumentasi
-
-Dokumentasi rumus dan panduan penggunaan tiap modul: _(menyusul)_
