@@ -24,25 +24,6 @@ Seluruh modul dikembangkan di atas arsitektur yang sama: antarmuka React di brow
 | 10 | K-medoids | Bela Novita Sari (222212534) | [K-Medoids](#k-medoids) |
 | 11 | Text analytics | Yedija Lewi Suryadi (222212921) | [Text Analytics](#text-analytics) |
 
-### Cara menambahkan bagian modul
-
-Salin kerangka berikut ke bagian bawah dokumen ini, ganti isinya, lalu isi tautan pada tabel di atas. Berkas panduan penggunaan disimpan di folder [1. Panduan Penggunaan](1.%20Panduan%20Penggunaan/).
-
-```markdown
-## Nama Modul
-
-**Nama**             : ...
-**NIM**              : ...
-**Judul Skripsi**    : ...
-**Dosen Pembimbing** : ...
-
-### Deskripsi singkat
-### Cara mengakses (menu dan tab)
-### Fitur dan keluaran
-### Struktur direktori
-### Dokumentasi (rumus dan panduan penggunaan)
-```
-
 ---
 
 ## Regresi Logistik Biner
@@ -184,10 +165,7 @@ Worker hanya membaca salinan ini, jadi bila langkah penyalinan terlewat, tampila
 
 ### Dokumentasi
 
-- Panduan penggunaan modul: [Panduan Penggunaan Statify Regresi Logistik Biner](1.%20Panduan%20Penggunaan/Panduan%20Penggunaan%20Statify%20Regresi%20Logistik%20Biner.docx.pdf).
-- Panduan penggunaan Statify (umum): [PANDUAN PENGGUNAAN STATIFY.pdf](1.%20Panduan%20Penggunaan/PANDUAN%20PENGGUNAAN%20STATIFY.pdf).
 - Panduan di dalam aplikasi: halaman **Help**, bagian Binary Logistic Regression.
-- Dokumentasi rumus: _(tautan menyusul)_
 
 ---
 
@@ -307,7 +285,6 @@ Setelah itu salin berkas `statify_multinomial*` dan `package.json` dari `wasm/pk
 ### Dokumentasi
 
 - Dokumentasi algoritma dan rumus: [ALGORITMA_DAN_RUMUS.md](frontend/components/Modals/Analyze/Regression/MultinomialLogistic/ALGORITMA_DAN_RUMUS.md).
-- Panduan penggunaan Statify (umum): [PANDUAN PENGGUNAAN STATIFY.pdf](1.%20Panduan%20Penggunaan/PANDUAN%20PENGGUNAAN%20STATIFY.pdf).
 - Panduan di dalam aplikasi: halaman **Help**, bagian Multinomial Logistic Regression.
 - Panduan penggunaan modul: _(tautan menyusul)_
 
@@ -555,7 +532,6 @@ Data, sintaks SPSS, keluaran SPSS, harness, dan laporan pengujian tersimpan di f
 
 - Dokumentasi teknis (arsitektur, alur data, algoritma): [multivariate/architecture.md](frontend/components/Modals/Analyze/general-linear-model/multivariate/architecture.md) dan [repeated-measures/architecture.md](frontend/components/Modals/Analyze/general-linear-model/repeated-measures/architecture.md), serta README di masing-masing folder modul.
 - Panduan di dalam aplikasi: halaman **Help**, bagian GLM Multivariate dan GLM Repeated Measures.
-- Panduan penggunaan Statify (umum): [PANDUAN PENGGUNAAN STATIFY.pdf](1.%20Panduan%20Penggunaan/PANDUAN%20PENGGUNAAN%20STATIFY.pdf).
 - Panduan penggunaan modul: _(tautan menyusul)_
 
 ---
@@ -735,7 +711,6 @@ Setelah itu salin `wasm_bg.wasm`, `wasm.js`, `wasm.d.ts`, `wasm_bg.wasm.d.ts`, d
 ### Dokumentasi
 
 - Panduan di dalam aplikasi: halaman **Help**, bagian Discriminant Analysis. Isinya mencakup variabel, metode stepwise, statistik, klasifikasi, save dan bootstrap, uji asumsi, serta cara membaca keluaran.
-- Panduan penggunaan Statify (umum): [PANDUAN PENGGUNAAN STATIFY.pdf](1.%20Panduan%20Penggunaan/PANDUAN%20PENGGUNAAN%20STATIFY.pdf).
 - Panduan penggunaan modul: _(tautan menyusul)_
 
 ---
@@ -1360,7 +1335,6 @@ Setelah itu salin `wasm.js`, `wasm_bg.wasm`, `wasm.d.ts`, dan `wasm_bg.wasm.d.ts
 ### Dokumentasi
 
 - Bantuan di dalam dialog: ikon bantuan pada setiap pengaturan (`dialogs/field-help.tsx`).
-- Panduan penggunaan Statify (umum): [PANDUAN PENGGUNAAN STATIFY.pdf](1.%20Panduan%20Penggunaan/PANDUAN%20PENGGUNAAN%20STATIFY.pdf).
 - Panduan penggunaan modul: _(tautan menyusul)_
 
 ---
